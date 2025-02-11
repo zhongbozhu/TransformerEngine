@@ -42,7 +42,7 @@ extern "C" {
  *  of the output tensor should be set to 0.
  */
 
-/*! \brief Find amax value of input tensor for FP8 quantier. 
+/*! \brief Find amax value of input tensor for FP8 quantier.
  *         Then it will use this amax to compute scale and scale_inv.
  *         TODO: If there is need for amax reduction in distrbuted world...
  *

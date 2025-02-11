@@ -141,15 +141,15 @@ void performTestCurrentScaling(const size_t N, const size_t H) {
   // find out max fp8 value
   float max_fp8;
   if (is_out_fp8){
-    switch (otype) {                                                                        
-      case DType::kFloat8E5M2: {                                   
+    switch (otype) {
+      case DType::kFloat8E5M2: {
           max_fp8 = Quantized_Limits<fp8e5m2>::max();
-      } break;                                                     
-      case DType::kFloat8E4M3: { 
+      } break;
+      case DType::kFloat8E4M3: {
           max_fp8 = Quantized_Limits<fp8e4m3>::max();
-      } break;                                                     
-      default:                                                     
-        NVTE_ERROR("Invalid type.");                               
+      } break;
+      default:
+        NVTE_ERROR("Invalid type.");
     }
   }
 
@@ -177,7 +177,7 @@ void performTestCurrentScaling(const size_t N, const size_t H) {
   }
 
   compute_ref<InputType, OutputType, false>(input.rowwise_cpu_dptr<InputType>(), ref_output_c.get(),
-                                     ref_output_t.get(), N, H, nullptr, 
+                                     ref_output_t.get(), N, H, nullptr,
                                      is_out_fp8 ? output.scale() : 1.0f );
 
   cudaDeviceSynchronize();

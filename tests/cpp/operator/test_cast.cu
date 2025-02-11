@@ -46,7 +46,7 @@ void compute_amax_scale_ref(const InputType *data,
                  float max_fp8, float epsilon) {
   using compute_t = float;
   compute_t current_max = -1e100;
-  for (size_t i = 0; i < size; ++i) { 
+  for (size_t i = 0; i < size; ++i) {
     compute_t current = static_cast<compute_t>(data[i]);
     current_max = fmaxf(current_max, fabsf(current));
   }
@@ -139,15 +139,15 @@ void performTestCurrentScaling(const std::vector<size_t>& shape) {
   // find out max fp8 value
   float max_fp8;
   if (is_out_fp8){
-    switch (otype) {                                                                        
-      case DType::kFloat8E5M2: {                                   
+    switch (otype) {
+      case DType::kFloat8E5M2: {
           max_fp8 = Quantized_Limits<fp8e5m2>::max();
-      } break;                                                     
-      case DType::kFloat8E4M3: { 
+      } break;
+      case DType::kFloat8E4M3: {
           max_fp8 = Quantized_Limits<fp8e4m3>::max();
-      } break;                                                     
-      default:                                                     
-        NVTE_ERROR("Invalid type.");                               
+      } break;
+      default:
+        NVTE_ERROR("Invalid type.");
     }
   }
 

@@ -85,7 +85,7 @@ __global__ void __launch_bounds__(block_size) cast_transpose_optimized_kernel(
         const CType in = static_cast<CType>(local_input.data.elt[j2]);
         const OType out = OType(in * scale);
         __builtin_assume(amax >= 0);
-        if constexpr (!IS_CURRENT_SCALING){
+        if constexpr (!IS_CURRENT_SCALING) {
           amax = fmaxf(fabsf(in), amax);
         }
         local_output_c.data.elt[j2] = out;
@@ -118,7 +118,7 @@ __global__ void __launch_bounds__(block_size) cast_transpose_optimized_kernel(
   }
 
   // Reduce amax over block
-  if constexpr (!IS_CURRENT_SCALING){
+  if constexpr (!IS_CURRENT_SCALING) {
     if (amax_ptr != nullptr) {
       amax = reduce_max<warps_per_tile>(amax, tidy);
       if (threadIdx.x == 0) {

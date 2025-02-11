@@ -100,7 +100,8 @@ struct KernelConfig {
   }
 };
 
-template <size_t load_size, size_t store_size, bool IS_CURRENT_SCALING, typename IType, typename OType>
+template <size_t load_size, size_t store_size, bool IS_CURRENT_SCALING, typename IType,
+          typename OType>
 __global__ void __launch_bounds__(block_size) cast_transpose_general_kernel(
     const IType *__restrict__ const input, const CType *__restrict__ const noop,
     OType *__restrict__ const output_c, OType *__restrict__ const output_t,
@@ -162,7 +163,7 @@ __global__ void __launch_bounds__(block_size) cast_transpose_general_kernel(
             const CType in = input[row * row_length + col + j2];
             const OType out = OType(in * scale);
             __builtin_assume(amax >= 0);
-            if constexpr (!IS_CURRENT_SCALING){
+            if constexpr (!IS_CURRENT_SCALING) {
               amax = fmaxf(fabsf(in), amax);
             }
             output_c[row * row_length + col + j2] = out;
@@ -202,7 +203,7 @@ __global__ void __launch_bounds__(block_size) cast_transpose_general_kernel(
     __syncthreads();
   }
 
-  if constexpr (!IS_CURRENT_SCALING){
+  if constexpr (!IS_CURRENT_SCALING) {
     // Reduce amax over block
     if (amax_ptr != nullptr) {
       amax = reduce_max<warps_per_tile>(amax, tidy);
@@ -303,8 +304,7 @@ void cast_transpose(const Tensor &input, const Tensor &noop, Tensor *output_, cu
                   "cast_transpose"
                   ",itype=",
                   itype_name, ",otype=", otype_name, ",load_size=", load_size,
-                  ",store_size=", store_size,
-                  ",is_current_scaling=", is_current_scaling);
+                  ",store_size=", store_size, ",is_current_scaling=", is_current_scaling);
               if (!rtc_manager.is_compiled(kernel_label)) {
                 std::string code = string_code_transpose_rtc_cast_transpose_cu;
                 code = regex_replace(code, "__ITYPE__", itype_name);
@@ -333,23 +333,21 @@ void cast_transpose(const Tensor &input, const Tensor &noop, Tensor *output_, cu
               const int num_blocks =
                   (DIVUP(row_length, row_tile_size) * DIVUP(num_rows, col_tile_size));
 
-              #define LAUNCH_CAST_TRANSPOSE_GENERAL_KERNEL(is_current_scaling_)                         \
-              do {                                                                                      \
-                  cast_transpose_general_kernel<load_size, store_size, is_current_scaling_,             \
-                                                InputType, OutputType>                                  \
-                  <<<num_blocks, block_size, 0, stream>>>(                                              \
-                      static_cast<const InputType *>(input.data.dptr),                                  \
-                      reinterpret_cast<const CType *>(noop.data.dptr),                                  \
-                      static_cast<OutputType *>(output.data.dptr),                                      \
-                      static_cast<OutputType *>(output.columnwise_data.dptr),                           \
-                      static_cast<const CType *>(output.scale.dptr),                                    \
-                      static_cast<CType *>(output.amax.dptr),                                           \
-                      static_cast<CType *>(output.scale_inv.dptr), row_length, num_rows);               \
-              } while (false)
+#define LAUNCH_CAST_TRANSPOSE_GENERAL_KERNEL(is_current_scaling_)                              \
+  do {                                                                                         \
+    cast_transpose_general_kernel<load_size, store_size, is_current_scaling_, InputType,       \
+                                  OutputType><<<num_blocks, block_size, 0, stream>>>(          \
+        static_cast<const InputType *>(input.data.dptr),                                       \
+        reinterpret_cast<const CType *>(noop.data.dptr),                                       \
+        static_cast<OutputType *>(output.data.dptr),                                           \
+        static_cast<OutputType *>(output.columnwise_data.dptr),                                \
+        static_cast<const CType *>(output.scale.dptr), static_cast<CType *>(output.amax.dptr), \
+        static_cast<CType *>(output.scale_inv.dptr), row_length, num_rows);                    \
+  } while (false)
 
-              if (is_current_scaling){
+              if (is_current_scaling) {
                 LAUNCH_CAST_TRANSPOSE_GENERAL_KERNEL(true);
-              }else{
+              } else {
                 LAUNCH_CAST_TRANSPOSE_GENERAL_KERNEL(false);
               }
             }
