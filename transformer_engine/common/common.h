@@ -131,7 +131,7 @@ struct Tensor {
     if (!has_data() && has_columnwise_data()) {
       const auto &data_shape = columnwise_data.shape;
       if (data_shape.empty()) return 1;
-      if (scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
+      if (scaling_mode == NVTE_DELAYED_TENSOR_SCALING || scaling_mode == NVTE_CURRENT_TENSOR_SCALING) {
         return product(data_shape, 1, data_shape.size());
       } else {
         return product(data_shape, 0, data_shape.size() - 1);
@@ -151,7 +151,7 @@ struct Tensor {
     if (!has_data() && has_columnwise_data()) {
       const auto &data_shape = columnwise_data.shape;
       if (data_shape.empty()) return 1;
-      if (scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
+      if (scaling_mode == NVTE_DELAYED_TENSOR_SCALING || scaling_mode == NVTE_CURRENT_TENSOR_SCALING) {
         return data_shape.front();
       } else {
         return data_shape.back();
@@ -438,7 +438,7 @@ std::string to_string(const DType type);
 std::string to_string(const NVTEScalingMode &type);
 
 inline bool is_tensor_scaling(const NVTEScalingMode &mode) {
-  return mode == NVTE_DELAYED_TENSOR_SCALING;
+  return mode == NVTE_DELAYED_TENSOR_SCALING || mode == NVTE_CURRENT_TENSOR_SCALING ;
 }
 
 inline bool is_block_scaling(const NVTEScalingMode &mode) {
@@ -447,6 +447,10 @@ inline bool is_block_scaling(const NVTEScalingMode &mode) {
 
 inline bool is_delayed_tensor_scaling(const NVTEScalingMode &mode) {
   return is_tensor_scaling(mode);
+}
+
+inline bool is_current_tensor_scaling(const NVTEScalingMode &mode) {
+  return mode == NVTE_CURRENT_TENSOR_SCALING;
 }
 
 inline bool is_mxfp_scaling(const NVTEScalingMode &mode) { return mode == NVTE_MXFP8_1D_SCALING; }

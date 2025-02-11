@@ -24,6 +24,15 @@
 #include "transformer_engine/activation.h"
 #include "transformer_engine/transpose.h"
 
+void nvte_compute_amax(const NVTETensor input, const NVTETensor output, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_compute_amax);
+  using namespace transformer_engine;
+  // suppose to hanlde per-tensor CS and 1xN CS
+  // mxfp8 scaling like block-level, sub-channel level don't need this api because
+  // compute amax and quantization can be fused into one kernel because cache can fit
+  detail::compute_amax_helper<false>(input, output, stream);
+}
+
 void nvte_quantize(const NVTETensor input, NVTETensor output, cudaStream_t stream) {
   NVTE_API_CALL(nvte_quantize);
   using namespace transformer_engine;
