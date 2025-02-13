@@ -136,6 +136,24 @@ class Float8Quantizer : public Quantizer {
       std::optional<at::Tensor> rowwise_data = std::nullopt) const override;
 };
 
+class Float8CurrentScalingQuantizer : public Quantizer {
+ public:
+  at::Tensor scale;
+  at::Tensor scale_inv;
+  at::Tensor amax;
+  DType dtype;
+
+  explicit Float8CurrentScalingQuantizer(const py::handle& quantizer);
+
+  NVTEScalingMode get_scaling_mode() const override { return NVTE_CURRENT_TENSOR_SCALING; }
+
+  void set_quantization_params(TensorWrapper* tensor) const override;
+
+  std::pair<TensorWrapper, py::object> create_tensor(
+      const std::vector<size_t>& shape, DType dtype,
+      std::optional<at::Tensor> rowwise_data = std::nullopt) const override;
+};
+
 class MXFP8Quantizer : public Quantizer {
  public:
   DType dtype;

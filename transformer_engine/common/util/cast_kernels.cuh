@@ -1273,7 +1273,7 @@ void compute_amax_helper(const NVTETensor input, const NVTETensor output, cudaSt
                    to_string(output_tensor->scaling_mode) + ".");
       }
       // TODO: pass in real epsilon and max_fp8
-      fp8_quantize_compute_scale_from_amax<false>(output_tensor, 0.0f, stream);
+      fp8_quantize_compute_scale_from_amax<true>(output_tensor, 0.0f, stream);
       break;
     }
     default:
