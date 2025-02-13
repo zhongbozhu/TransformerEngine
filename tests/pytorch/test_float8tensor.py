@@ -347,12 +347,29 @@ class TestCurrentScalingFloat8Tensor:
 
     @pytest.mark.parametrize("fp8_dtype", [tex.DType.kFloat8E4M3], ids=str)
     @pytest.mark.parametrize("dtype", [torch.bfloat16], ids=str)
-    @pytest.mark.parametrize("dims", [[128, 128]])
-    def test_quantize_dequantize(
-        self, fp8_dtype: tex.DType, dtype: torch.dtype, dims: DimsType
+    @pytest.mark.parametrize("dims", [[], 1, 311, [7, 11], [7, 5, 3], [2, 3, 5, 3]])
+    def test_quantize_dequantize(self, 
+                    fp8_dtype: tex.DType,
+                    dtype: torch.dtype,
+                    dims: DimsType
     ) -> None:
         """Check numerical error when casting to FP8 and back"""
-        pass
+
+        # Initialize random high precision data
+        device = "cuda"
+        x_hp = 2 * torch.rand(_to_list(dims), dtype=dtype, device=device) - 1
+
+        # Cast to FP8 and back
+        x_fp8 = to_float8_CS(x_hp, fp8_dtype=fp8_dtype)
+        x_fp8_dequantized = x_fp8.dequantize()
+
+        # Check results
+        torch.testing.assert_close(x_fp8_dequantized, x_hp, **_tols[fp8_dtype])
+
+        # Make sure we are not trivially passing the test
+        with pytest.raises(AssertionError):
+            torch.testing.assert_close(x_fp8_dequantized, -x_hp, **_tols[fp8_dtype])
+
 
     def test_basic_ops(
         self,
