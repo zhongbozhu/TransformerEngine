@@ -3,10 +3,9 @@ import transformer_engine_torch as tex
 
 from transformer_engine.pytorch.constants import TE_DType_To_Torch
 
+
 # compute amax and scale
-def _ref_compute_amax_scale(
-    x, quant_dtype, eps, pow_2_scales
-):
+def _ref_compute_amax_scale(x, quant_dtype, eps, pow_2_scales):
     x_fp32 = x.to(torch.float32)
     amax = torch.amax(torch.abs(x_fp32)).view(1)
     assert amax.dtype == torch.float, "amax must be a float tensor."
@@ -52,26 +51,27 @@ def _ref_compute_amax_scale(
 def _multi_dim_transpose(tensor):
     # Get the number of dimensions
     dims = list(range(len(tensor.shape)))
-    
+
     if len(dims) <= 1:
         return tensor
 
     # circular shift of shapes
     new_order = []
     new_order.append(dims[-1])
-    for i in range(len(dims)-1):
+    for i in range(len(dims) - 1):
         new_order.append(dims[i])
-    
+
     # Permute the tensor according to the new order
     output_tensor = tensor.permute(new_order).contiguous()
-    
+
     return output_tensor
+
 
 # current scaling reference quantization
 def ref_per_tensor_cs_cast(
     tensor: torch.Tensor,
     fp8_dtype: tex.DType = tex.DType.kFloat8E4M3,
-    return_transpose: bool = False
+    return_transpose: bool = False,
 ) -> torch.Tensor:
 
     quant_dtype_torch = TE_DType_To_Torch[fp8_dtype]

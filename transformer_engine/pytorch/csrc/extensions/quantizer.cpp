@@ -140,7 +140,8 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
   return {std::move(tensor), std::move(ret)};
 }
 
-Float8CurrentScalingQuantizer::Float8CurrentScalingQuantizer(const py::handle& quantizer) : Quantizer(quantizer) {
+Float8CurrentScalingQuantizer::Float8CurrentScalingQuantizer(const py::handle& quantizer)
+    : Quantizer(quantizer) {
   const at::Tensor& scale = quantizer.attr("scale").cast<at::Tensor>();
   const at::Tensor& amax = quantizer.attr("amax").cast<at::Tensor>();
   const DType type = quantizer.attr("dtype").cast<DType>();
@@ -175,7 +176,7 @@ std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_tenso
   using namespace pybind11::literals;
   std::vector<int64_t> rowwise_torch_shape;
   std::vector<int64_t> columnwise_torch_shape;
-  std::vector<int64_t> scale_inv_torch_shape = {1}; // Shape of 1 element for scale_inv
+  std::vector<int64_t> scale_inv_torch_shape = {1};  // Shape of 1 element for scale_inv
 
   if (!shape.empty()) {
     columnwise_torch_shape.emplace_back(static_cast<int64_t>(shape.back()));

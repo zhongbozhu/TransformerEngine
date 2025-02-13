@@ -51,9 +51,9 @@ TensorWrapper makeTransformerEngineTensor(py::handle tensor, py::handle quantize
   // float8 tensor -> delayed scaling quantizer OR current scaling quantizer
   // also during dequantize, the quantizer param is unknown -> so quantizer is NoneQuantizer
   for (auto [check_type, check_quantizer_type, create_tensor, _] :
-      detail::custom_types_converters) {
+       detail::custom_types_converters) {
     if (check_type(tensor.ptr())) {
-      if (!(quantizer.is_none() || check_quantizer_type(quantizer.ptr()))){
+      if (!(quantizer.is_none() || check_quantizer_type(quantizer.ptr()))) {
         continue;
       }
       auto x = create_tensor(tensor, my_quantizer.get());

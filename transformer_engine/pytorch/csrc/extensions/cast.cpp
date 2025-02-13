@@ -11,7 +11,6 @@
 #include "pybind.h"
 #include "transformer_engine/transformer_engine.h"
 
-
 namespace transformer_engine::pytorch {
 
 py::object quantize(const at::Tensor& tensor, py::handle quantizer, const py::object& output,
@@ -48,7 +47,7 @@ py::object quantize(const at::Tensor& tensor, py::handle quantizer, const py::ob
   if (te_output.numel() == 0) return out;
 
   auto scaling_mode = my_quantizer->get_scaling_mode();
-  if (need_compute_amax_before_quantize(scaling_mode)){
+  if (need_compute_amax_before_quantize(scaling_mode)) {
     nvte_compute_amax(te_input.data(), te_output.data(), at::cuda::getCurrentCUDAStream());
   }
   nvte_quantize_noop(te_input.data(), te_output.data(), te_noop.data(),

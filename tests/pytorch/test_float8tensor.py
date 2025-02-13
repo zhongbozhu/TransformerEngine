@@ -12,7 +12,11 @@ import torch
 import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer, Float8Tensor, Float8CurrentScalingQuantizer
+from transformer_engine.pytorch.tensor.float8_tensor import (
+    Float8Quantizer,
+    Float8Tensor,
+    Float8CurrentScalingQuantizer,
+)
 from transformer_engine.pytorch.constants import TE_DType, TE_DType_To_Torch
 import transformer_engine_torch as tex
 
@@ -44,6 +48,7 @@ DimsType = Union[Iterable[int], int]
 # Check if FP8 is supported
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 
+
 # delayed scaling
 def to_float8(
     tensor: torch.Tensor,
@@ -58,18 +63,16 @@ def to_float8(
     )
     return quantizer(tensor.cuda())
 
+
 # current scaling
 def to_float8_CS(
     tensor: torch.Tensor,
     fp8_dtype: tex.DType = tex.DType.kFloat8E4M3,
-    return_transpose: bool = False
+    return_transpose: bool = False,
 ) -> Float8Tensor:
     """Cast tensor to FP8"""
     tensor = tensor.cuda()
-    quantizer = Float8CurrentScalingQuantizer(
-        fp8_dtype=fp8_dtype,
-        device=tensor.device
-    )
+    quantizer = Float8CurrentScalingQuantizer(fp8_dtype=fp8_dtype, device=tensor.device)
     if return_transpose:
         quantizer.set_usage(rowwise=True, columnwise=True)
     return quantizer(tensor)
@@ -314,15 +317,14 @@ class TestCurrentScalingFloat8Tensor:
     # add return_transpose test, pow2scaling test
     @pytest.mark.parametrize("fp8_dtype", _fp8_dtypes)
     @pytest.mark.parametrize("dtype", _dtypes)
-    @pytest.mark.parametrize("dims", [[], 1, 311, [7, 11], [7, 5, 3], [2, 3, 5, 3], [128,128], [611,782]])
+    @pytest.mark.parametrize(
+        "dims", [[], 1, 311, [7, 11], [7, 5, 3], [2, 3, 5, 3], [128, 128], [611, 782]]
+    )
     @pytest.mark.parametrize("return_transpose", [True, False], ids=str)
-    def test_quantize(self, 
-                    fp8_dtype: tex.DType,
-                    dtype: torch.dtype,
-                    dims: DimsType,
-                    return_transpose: bool
+    def test_quantize(
+        self, fp8_dtype: tex.DType, dtype: torch.dtype, dims: DimsType, return_transpose: bool
     ) -> None:
-        """Check numerical error when casting to FP8 """
+        """Check numerical error when casting to FP8"""
 
         # Initialize random high precision data
         device = "cuda"
@@ -332,21 +334,22 @@ class TestCurrentScalingFloat8Tensor:
         x_fp8 = to_float8_CS(x_hp, fp8_dtype=fp8_dtype, return_transpose=return_transpose)
 
         # get reference implementation of current scaling
-        x_fp8_ref, sx_ref, x_fp8_t_ref, _ = ref_per_tensor_cs_cast(x_hp, fp8_dtype=fp8_dtype, return_transpose=return_transpose)
+        x_fp8_ref, sx_ref, x_fp8_t_ref, _ = ref_per_tensor_cs_cast(
+            x_hp, fp8_dtype=fp8_dtype, return_transpose=return_transpose
+        )
 
         torch.testing.assert_close(x_fp8._data, x_fp8_ref.view(torch.uint8), atol=0.0, rtol=0.0)
         torch.testing.assert_close(x_fp8._scale_inv, sx_ref, atol=0.0, rtol=0.0)
         if return_transpose:
-            torch.testing.assert_close(x_fp8._transpose, x_fp8_t_ref.view(torch.uint8), atol=0.0, rtol=0.0)
-
+            torch.testing.assert_close(
+                x_fp8._transpose, x_fp8_t_ref.view(torch.uint8), atol=0.0, rtol=0.0
+            )
 
     @pytest.mark.parametrize("fp8_dtype", [tex.DType.kFloat8E4M3], ids=str)
     @pytest.mark.parametrize("dtype", [torch.bfloat16], ids=str)
-    @pytest.mark.parametrize("dims", [[128,128]])
-    def test_quantize_dequantize(self, 
-                    fp8_dtype: tex.DType,
-                    dtype: torch.dtype,
-                    dims: DimsType
+    @pytest.mark.parametrize("dims", [[128, 128]])
+    def test_quantize_dequantize(
+        self, fp8_dtype: tex.DType, dtype: torch.dtype, dims: DimsType
     ) -> None:
         """Check numerical error when casting to FP8 and back"""
         pass
@@ -376,7 +379,7 @@ class TestCurrentScalingFloat8Tensor:
         dims: DimsType = [2, 3, 5],
         fp8_dtype: tex.DType = tex.DType.kFloat8E4M3,
         dtype: torch.dtype = torch.float32,
-    ):  
+    ):
         # TODO
         pass
 

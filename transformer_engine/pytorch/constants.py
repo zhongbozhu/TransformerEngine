@@ -31,7 +31,7 @@ TE_DType_To_Torch = {
     tex.DType.kInt32: torch.int32,
     tex.DType.kFloat32: torch.float32,
     tex.DType.kFloat16: torch.half,
-    tex.DType.kBFloat16: torch.bfloat16
+    tex.DType.kBFloat16: torch.bfloat16,
 }
 
 AttnMaskTypes = (

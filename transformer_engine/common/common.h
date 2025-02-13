@@ -459,7 +459,7 @@ inline bool is_mxfp_scaling(const NVTEScalingMode &mode) { return mode == NVTE_M
 
 // any scaling recipe that has scaling granularity larger than what GPU cache can fit will need this
 // per-tensor current scaling is a example, because scaling granularity is essentially MxN
-inline bool need_compute_amax_before_quantize(const NVTEScalingMode &mode){
+inline bool need_compute_amax_before_quantize(const NVTEScalingMode &mode) {
   return mode == NVTE_CURRENT_TENSOR_SCALING;
 }
 

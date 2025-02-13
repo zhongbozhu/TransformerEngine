@@ -164,7 +164,7 @@ class Float8Quantizer(Quantizer):
             data_transpose=None,
             quantizer=self,
         )
-    
+
 
 class Float8CurrentScalingQuantizer(Quantizer):
     """Builder class for FP8 tensors with per-tensor current scaling
@@ -179,7 +179,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
     scaling quantization kernels, instead of using values taken from delayed scaling
     history window. Therefore, device parameter is needed for tensor allocation.
 
-    Both Float8CurrentScalingQuantizer and Float8Quantizer produces Float8Tensor, 
+    Both Float8CurrentScalingQuantizer and Float8Quantizer produces Float8Tensor,
     because they are both per-tensor scaling, ie. one scaling factor per tensor.
 
     """
@@ -279,8 +279,8 @@ class Float8CurrentScalingQuantizer(Quantizer):
         internal: bool = False,
     ):
         """
-            Create Float8Tensor from raw uint8 data, unlike delayed scaling, 
-            self.scale doesn't mean anything, so we are simply creating empty scale_inv
+        Create Float8Tensor from raw uint8 data, unlike delayed scaling,
+        self.scale doesn't mean anything, so we are simply creating empty scale_inv
         """
         assert data.dtype in [
             torch.uint8,
