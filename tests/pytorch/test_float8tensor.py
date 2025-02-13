@@ -348,10 +348,8 @@ class TestCurrentScalingFloat8Tensor:
     @pytest.mark.parametrize("fp8_dtype", [tex.DType.kFloat8E4M3], ids=str)
     @pytest.mark.parametrize("dtype", [torch.bfloat16], ids=str)
     @pytest.mark.parametrize("dims", [[], 1, 311, [7, 11], [7, 5, 3], [2, 3, 5, 3]])
-    def test_quantize_dequantize(self, 
-                    fp8_dtype: tex.DType,
-                    dtype: torch.dtype,
-                    dims: DimsType
+    def test_quantize_dequantize(
+        self, fp8_dtype: tex.DType, dtype: torch.dtype, dims: DimsType
     ) -> None:
         """Check numerical error when casting to FP8 and back"""
 
@@ -369,7 +367,6 @@ class TestCurrentScalingFloat8Tensor:
         # Make sure we are not trivially passing the test
         with pytest.raises(AssertionError):
             torch.testing.assert_close(x_fp8_dequantized, -x_hp, **_tols[fp8_dtype])
-
 
     def test_basic_ops(
         self,
