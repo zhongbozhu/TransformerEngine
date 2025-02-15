@@ -24,6 +24,7 @@ from ._common import _ParameterInitMeta
 from ..fp8 import (
     MXFP8BlockScalingRecipeState,
     DelayedScalingRecipeState,
+    PerTensorCurrentScalingRecipeState,
     FP8GlobalStateManager,
     RecipeState,
 )
@@ -37,6 +38,7 @@ from ..constants import dist_group_type
 from ..tensor import QuantizedTensor, Quantizer
 from ..tensor._internal.float8_tensor_base import Float8TensorBase
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
+from ..tensor.float8_tensor import Float8CurrentScalingQuantizer
 
 __all__ = ["initialize_ub", "destroy_ub"]
 
@@ -545,6 +547,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 return
             if recipe.mxfp8() and isinstance(recipe_state, MXFP8BlockScalingRecipeState):
                 return
+            if recipe.current_scaled() and isinstance(recipe_state, PerTensorCurrentScalingRecipeState):
+                return
 
         # Max. number of fp8 tensors per GEMM = 3 (input, weight, output) for fwd and
         # 2 (grad_output and grad_input) for bwd
@@ -908,7 +912,12 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             if isinstance(grad_output, (QuantizedTensor, Float8TensorBase, MXFP8TensorBase)):
                 grad_bias = grad_output.dequantize().view(-1, grad_output.shape[-1]).sum(dim=0)
             else:
-                grad_bias, grad_output = tex.bgrad_quantize(grad_output, quantizer)
+                # TODO zhongboz: the fused kernel of cast_transpose + dgrad calculation is still not ready for per-tensor current scaling
+                if isinstance(quantizer, Float8CurrentScalingQuantizer):
+                    # unfuse bgrad for now
+                    grad_bias = grad_output.view(-1, grad_output.shape[-1]).sum(dim=0)
+                else:
+                    grad_bias, grad_output = tex.bgrad_quantize(grad_output, quantizer)
         if not isinstance(grad_output, (QuantizedTensor, Float8TensorBase, MXFP8TensorBase)):
             grad_output = quantizer(grad_output)
         return grad_output, grad_bias
