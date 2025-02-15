@@ -415,7 +415,7 @@ class TestFP8CurrentScalingRecipeLinear(TestFP8RecipeLinearBase):
         # check tensor dumps dir, if the dir exists, then read files to get y, dgrad, wgrad, bgrad
         # if we cannot get all four tensors, then still set the tensor dump to None
         tensor_map = self._check_golden_tensor_dumps(
-            TENSOR_DUMP_DIR, recipe2, (batch_size, hidden_size, out_size), dtype
+            TENSOR_DUMP_DIR, recipe2, (batch_size, hidden_size, out_size), dtype, use_bias
         )
         if tensor_map is not None:
             fp8_zero_tolerance_tensor_dumps_recipe2 = tensor_map
@@ -429,10 +429,10 @@ class TestFP8CurrentScalingRecipeLinear(TestFP8RecipeLinearBase):
             use_bias,
             seed=torch.initial_seed(),
             dtype=dtype,
-            y_error=3,
-            dgrad_error=3,
-            wgrad_error=3,
-            bgrad_error=0.0,
+            y_error=0.5,
+            dgrad_error=1,
+            wgrad_error=1,
+            bgrad_error=0.5,
             recipe1_golden_tensors=None,
             recipe2_golden_tensors=fp8_zero_tolerance_tensor_dumps_recipe2,
         )

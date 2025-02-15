@@ -216,6 +216,12 @@ class _Linear(torch.autograd.Function):
             ub_obj.copy_into_buffer(inputmat_total, input_quantizer, local_chunk=True)
             inputmat_total = ub_obj.get_buffer(input_quantizer)
 
+        fprop_gemm_use_split_accumulator = _2X_ACC_FPROP
+        if fp8:
+            recipe = FP8GlobalStateManager.get_fp8_recipe()
+            if hasattr(recipe, 'fp8_gemm_fprop'):
+                fprop_gemm_use_split_accumulator = recipe.fp8_gemm_fprop.use_split_accumulator
+
         out, *_, rs_out = general_gemm(
             weightmat,
             inputmat_total,
@@ -223,7 +229,7 @@ class _Linear(torch.autograd.Function):
             quantization_params=output_quantizer,
             out_dtype=out_dtype,
             bias=bias,
-            use_split_accumulator=_2X_ACC_FPROP,
+            use_split_accumulator=fprop_gemm_use_split_accumulator,
             ub=ub_obj,
             ub_type=ub_type,
             extra_output=rs_out,
@@ -451,6 +457,12 @@ class _Linear(torch.autograd.Function):
                     ctx.grad_input_quantizer.set_usage(rowwise=True, columnwise=False)
 
                 # dgrad GEMM
+                dgrad_gemm_use_split_accumulator = _2X_ACC_DGRAD
+                if ctx.fp8:
+                    recipe = FP8GlobalStateManager.get_fp8_recipe()
+                    if hasattr(recipe, 'fp8_gemm_dgrad'):
+                        dgrad_gemm_use_split_accumulator = recipe.fp8_gemm_dgrad.use_split_accumulator
+
                 dgrad, *_, rs_out = general_gemm(
                     weight_fp8,
                     grad_output,
@@ -460,7 +472,7 @@ class _Linear(torch.autograd.Function):
                     quantization_params=ctx.grad_input_quantizer,
                     out=dgrad_bulk,
                     out_dtype=ctx.activation_dtype,
-                    use_split_accumulator=_2X_ACC_DGRAD,
+                    use_split_accumulator=dgrad_gemm_use_split_accumulator,
                     ub=ub_obj_dgrad,
                     ub_type=ub_type_dgrad,
                     extra_output=rs_out,
@@ -515,6 +527,12 @@ class _Linear(torch.autograd.Function):
 
                 # wgrad GEMM
                 # Note: Fuse with bgrad computation if needed
+                wgrad_gemm_use_split_accumulator = _2X_ACC_WGRAD
+                if ctx.fp8:
+                    recipe = FP8GlobalStateManager.get_fp8_recipe()
+                    if hasattr(recipe, 'fp8_gemm_wgrad'):
+                        wgrad_gemm_use_split_accumulator = recipe.fp8_gemm_wgrad.use_split_accumulator
+
                 wgrad, grad_bias_, _, rs_out = general_gemm(
                     inputmat_total,
                     grad_output,
@@ -526,7 +544,7 @@ class _Linear(torch.autograd.Function):
                     ),
                     bias=(bias if (grad_bias is None and not ctx.fp8) else None),
                     out=main_grad if ctx.fuse_wgrad_accumulation else None,
-                    use_split_accumulator=_2X_ACC_WGRAD,
+                    use_split_accumulator=wgrad_gemm_use_split_accumulator,
                     accumulate=accumulate_wgrad_into_param_main_grad,
                     ub=ub_obj_wgrad,
                     ub_type=ub_type_wgrad,

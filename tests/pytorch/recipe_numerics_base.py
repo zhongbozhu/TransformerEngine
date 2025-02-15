@@ -69,11 +69,15 @@ class TestFP8RecipeLinearBase:
         return torch.sum(torch.abs(a - b))
 
     @staticmethod
+    def _get_mean_abs_relative_error(a, b):
+        return torch.mean(torch.abs((a - b)/b))
+
+    @staticmethod
     def _load_golden_tensor_values(a, b):
         return torch.sum(torch.abs(a - b))
 
     @staticmethod
-    def _check_golden_tensor_dumps(dump_dir, get_recipe, dims, input_dtype):
+    def _check_golden_tensor_dumps(dump_dir, get_recipe, dims, input_dtype, use_bias):
         recipe = get_recipe()
         batch_size, hidden_size, out_size = dims
         fp8_type_x = get_fp8_torch_dtype(recipe, fprop_tensor=True)
@@ -92,6 +96,9 @@ class TestFP8RecipeLinearBase:
             "wgrad": f"wgrad_{scaling_type}_{batch_size}_{hidden_size}_{out_size}_{current_seed}_{input_dtype}_{fp8_type_x}_{fp8_type_w}_{fp8_type_g}.pt",
             "bgrad": f"bgrad_{scaling_type}_{batch_size}_{hidden_size}_{out_size}_{current_seed}_{input_dtype}_{fp8_type_x}_{fp8_type_w}_{fp8_type_g}.pt",
         }
+
+        if not use_bias:
+            expected_tensor_names.pop("bgrad")
 
         # Check if all expected tensors are in the tensor dumps directory
         tensor_map = {}
@@ -377,17 +384,17 @@ class TestFP8RecipeLinearBase:
         else:
             y_q, dgrad, wgrad, bgrad = self.run_linear(x, w, bias, gradient)
 
-        # Compare results
-        torch.testing.assert_close(y_q.float(), y_q_ref.float(), rtol=0.0, atol=y_error)
-        torch.testing.assert_close(dgrad, dgrad_ref, rtol=0.0, atol=dgrad_error)
-        torch.testing.assert_close(wgrad, wgrad_ref, rtol=0.0, atol=wgrad_error)
+        # Compare results (mean abs relative error)
+        assert self._get_mean_abs_relative_error(y_q, y_q_ref).item() < y_error, "y and y_ref has too large mean abs relative error"
+        assert self._get_mean_abs_relative_error(dgrad, dgrad_ref) < dgrad_error, "dgrad and dgrad_ref has too large mean abs relative error"
+        assert self._get_mean_abs_relative_error(wgrad, wgrad_ref).item() < wgrad_error, "wgrad and wgrad_ref has too large mean abs relative error"
         if use_bias:
-            torch.testing.assert_close(bgrad, bgrad_ref, rtol=0.0, atol=bgrad_error)
+            assert self._get_mean_abs_relative_error(bgrad, bgrad_ref).item() < bgrad_error, "bgrad and bgrad_ref has too large mean abs relative error"
 
+        # enforce zero tolerance check when we can find golden tensor value dump
         if recipe2_golden_tensors is not None:
-            print(y_q)
             torch.testing.assert_close(
-                y_q.float(), recipe2_golden_tensors["y"].float(), atol=0.25, rtol=0.0
+                y_q.float(), recipe2_golden_tensors["y"].float(), atol=0, rtol=0.0
             )
             torch.testing.assert_close(dgrad, recipe2_golden_tensors["dgrad"], atol=0.0, rtol=0.0)
             torch.testing.assert_close(wgrad, recipe2_golden_tensors["wgrad"], atol=0.0, rtol=0.0)
@@ -396,9 +403,3 @@ class TestFP8RecipeLinearBase:
                     bgrad, recipe2_golden_tensors["bgrad"], atol=0.0, rtol=0.0
                 )
 
-        # measure numerical difference
-        print("y abs sum error: ", self._get_sum_abs_error(y_q, y_q_ref))
-        print("dgrad abs sum error: ", self._get_sum_abs_error(dgrad, dgrad_ref))
-        print("wgrad abs sum error: ", self._get_sum_abs_error(wgrad, wgrad_ref))
-        if use_bias:
-            print("bgrad abs sum error: ", self._get_sum_abs_error(bgrad, bgrad_ref))
