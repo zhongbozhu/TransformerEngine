@@ -13,7 +13,13 @@ from typing import Callable, List, Optional, Dict, Any, Tuple, Union
 
 import torch
 import transformer_engine_torch as tex
-from transformer_engine.common.recipe import Recipe, DelayedScaling, Format, MXFP8BlockScaling, PerTensorCurrentScaling
+from transformer_engine.common.recipe import (
+    Recipe,
+    DelayedScaling,
+    Format,
+    MXFP8BlockScaling,
+    PerTensorCurrentScaling,
+)
 
 from .constants import dist_group_type
 from .utils import get_device_compute_capability
@@ -430,8 +436,8 @@ class FP8GlobalStateManager:
         # FP8 weight modules are reduced at the end of the optimizer
         # step after the weight amax is populated.
         if enabled and cls.FP8_AUTOCAST_DEPTH == 0 and not _graph and torch.is_grad_enabled():
-             # delayed scaling only function, for other recipes (current scaling with any granularity), 
-             # this is noop for other recipes because cls.global_amax_buffer is empty list
+            # delayed scaling only function, for other recipes (current scaling with any granularity),
+            # this is noop for other recipes because cls.global_amax_buffer is empty list
             cls.reduce_and_update_fp8_tensors(forward=True)
 
     @classmethod
@@ -821,6 +827,7 @@ class DelayedScalingRecipeState(RecipeState):
             for i in range(self.num_quantizers)
         ]
 
+
 class PerTensorCurrentScalingRecipeState(RecipeState):
     """Configuration for Per-tensor current scaling quantization.
 
@@ -854,7 +861,11 @@ class PerTensorCurrentScalingRecipeState(RecipeState):
     def make_quantizers(self) -> list:
         from .tensor.float8_tensor import Float8CurrentScalingQuantizer
 
-        return [Float8CurrentScalingQuantizer(self.dtype, device=self.device) for i in range(self.num_quantizers)]
+        return [
+            Float8CurrentScalingQuantizer(self.dtype, device=self.device)
+            for i in range(self.num_quantizers)
+        ]
+
 
 class MXFP8BlockScalingRecipeState(RecipeState):
     """Configuration for MXFP8 quantization.

@@ -38,13 +38,16 @@ class Format(Enum):
     E5M2 = _FormatHelper(max_fwd=57344, max_bwd=57344)
     HYBRID = _FormatHelper(max_fwd=E4M3.max_fwd, max_bwd=E5M2.max_bwd)
 
+
 @dataclass(frozen=True)
 class MMParams:
-    """ for pytorch as an example, _scaled_mm use_fast_accum = (not use_split_accumulator)
-    apply split accumulator or not, turning it on will increase accuracy but impact gemm performance, 
+    """for pytorch as an example, _scaled_mm use_fast_accum = (not use_split_accumulator)
+    apply split accumulator or not, turning it on will increase accuracy but impact gemm performance,
     so only turn it on for certain gemms
     """
+
     use_split_accumulator: bool = True
+
 
 @dataclass(frozen=True)
 class QParams:
@@ -53,6 +56,7 @@ class QParams:
     amax_epsilon: optional minimum value of abs max
     scale_ieee_div: apply ieee_div to compute scale from amax: scale = MAX_FP8 / amax
     """
+
     power_2_scale: bool = False
     amax_epsilon: float = 0.0
     scale_ieee_div: bool = False
@@ -70,7 +74,7 @@ class Recipe:
     def delayed(self):
         """Whether the given recipe is delayed scaling."""
         return isinstance(self, DelayedScaling)
-    
+
     def current_scaled(self):
         """Whether the given recipe is (per-tensor) current scaling."""
         return isinstance(self, PerTensorCurrentScaling)
@@ -187,7 +191,7 @@ class DelayedScaling(Recipe):
 @dataclass()
 class PerTensorCurrentScaling(Recipe):
     """
-    Use the per-tensor current scaling factor strategy. 
+    Use the per-tensor current scaling factor strategy.
     Parameters
     ----------
     fp8_format : {Format.E4M3, Format.HYBRID}, default = Format.HYBRID
@@ -251,6 +255,7 @@ class PerTensorCurrentScaling(Recipe):
             f"fp8_dpa={self.fp8_dpa}, "
             f"fp8_mha={self.fp8_mha}"
         )
+
 
 @dataclass()
 class MXFP8BlockScaling(Recipe):

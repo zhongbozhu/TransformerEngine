@@ -547,7 +547,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 return
             if recipe.mxfp8() and isinstance(recipe_state, MXFP8BlockScalingRecipeState):
                 return
-            if recipe.current_scaled() and isinstance(recipe_state, PerTensorCurrentScalingRecipeState):
+            if recipe.current_scaled() and isinstance(
+                recipe_state, PerTensorCurrentScalingRecipeState
+            ):
                 return
 
         # Max. number of fp8 tensors per GEMM = 3 (input, weight, output) for fwd and

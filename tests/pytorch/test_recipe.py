@@ -29,6 +29,7 @@ TENSOR_DUMP_DIR = pathlib.Path(__file__).resolve().parent.parent.parent / "tenso
 # Check if FP8 is supported
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 
+
 # FP8 per tesnor delayed scaling
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 class TestFP8Recipe:
@@ -393,9 +394,7 @@ class TestFP8CurrentScalingRecipeLinear(TestFP8RecipeLinearBase):
             (16, 256, 128),
         ],
     )
-    @pytest.mark.parametrize(
-        "dtype", [torch.bfloat16], ids=["bf16"]
-    )
+    @pytest.mark.parametrize("dtype", [torch.bfloat16], ids=["bf16"])
     @pytest.mark.parametrize(
         "recipe1, recipe2",
         [
@@ -415,7 +414,9 @@ class TestFP8CurrentScalingRecipeLinear(TestFP8RecipeLinearBase):
         fp8_zero_tolerance_tensor_dumps_recipe2 = None
         # check tensor dumps dir, if the dir exists, then read files to get y, dgrad, wgrad, bgrad
         # if we cannot get all four tensors, then still set the tensor dump to None
-        tensor_map = self._check_golden_tensor_dumps(TENSOR_DUMP_DIR, recipe2, (batch_size, hidden_size, out_size), dtype)
+        tensor_map = self._check_golden_tensor_dumps(
+            TENSOR_DUMP_DIR, recipe2, (batch_size, hidden_size, out_size), dtype
+        )
         if tensor_map is not None:
             fp8_zero_tolerance_tensor_dumps_recipe2 = tensor_map
 
@@ -433,5 +434,5 @@ class TestFP8CurrentScalingRecipeLinear(TestFP8RecipeLinearBase):
             wgrad_error=3,
             bgrad_error=0.0,
             recipe1_golden_tensors=None,
-            recipe2_golden_tensors=fp8_zero_tolerance_tensor_dumps_recipe2
+            recipe2_golden_tensors=fp8_zero_tolerance_tensor_dumps_recipe2,
         )
