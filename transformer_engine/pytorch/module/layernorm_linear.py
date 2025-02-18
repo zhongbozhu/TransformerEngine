@@ -53,6 +53,7 @@ from ..tensor.quantized_tensor import (
     restore_from_saved,
 )
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
+from ..tensor.float8_tensor import Float8CurrentScalingQuantizer
 from ..cpu_offload import is_cpu_offload_enabled, set_offloading_param
 
 from ..cpp_extensions import (
@@ -149,6 +150,11 @@ class _LayerNormLinear(torch.autograd.Function):
 
         # Configure quantizer for normalization output
         with_quantized_norm = fp8 and not return_layernorm_output
+        # for Float8CurrentScalingQuantizer, layernorm/rmsnorm has not been fused with quantizer
+        # so we need to set with_quantized_norm to False
+        if isinstance(input_quantizer, Float8CurrentScalingQuantizer):
+            with_quantized_norm = False
+
         if with_quantized_norm:
             if with_input_all_gather:
                 input_quantizer.set_usage(rowwise=True, columnwise=False)
@@ -275,6 +281,12 @@ class _LayerNormLinear(torch.autograd.Function):
                 assert ub_obj.is_fp8_ubuf(), "AG overlap with FP8 GEMM inputs requires FP8 buffer."
             ln_out_total = ub_obj.get_buffer(input_quantizer)
 
+        fprop_gemm_use_split_accumulator = _2X_ACC_FPROP
+        if fp8:
+            recipe = FP8GlobalStateManager.get_fp8_recipe()
+            if hasattr(recipe, 'fp8_gemm_fprop'):
+                fprop_gemm_use_split_accumulator = recipe.fp8_gemm_fprop.use_split_accumulator
+
         out, *_, rs_out = general_gemm(
             weightmat,
             ln_out_total,
@@ -282,7 +294,7 @@ class _LayerNormLinear(torch.autograd.Function):
             quantization_params=output_quantizer,
             out_dtype=activation_dtype,
             bias=bias,
-            use_split_accumulator=_2X_ACC_FPROP,
+            use_split_accumulator=fprop_gemm_use_split_accumulator,
             ub=ub_obj,
             ub_type=ub_type,
             extra_output=rs_out,
@@ -536,6 +548,12 @@ class _LayerNormLinear(torch.autograd.Function):
             if ctx.grad_input_quantizer is not None:
                 ctx.grad_input_quantizer.set_usage(rowwise=True, columnwise=False)
 
+            dgrad_gemm_use_split_accumulator = _2X_ACC_DGRAD
+            if ctx.fp8:
+                recipe = FP8GlobalStateManager.get_fp8_recipe()
+                if hasattr(recipe, 'fp8_gemm_dgrad'):
+                    dgrad_gemm_use_split_accumulator = recipe.fp8_gemm_dgrad.use_split_accumulator
+
             dgrad, *_ = general_gemm(
                 weight,
                 grad_output,
@@ -545,7 +563,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 quantization_params=ctx.grad_input_quantizer,
                 out=dgrad_bulk,
                 out_dtype=ctx.activation_dtype,
-                use_split_accumulator=_2X_ACC_DGRAD,
+                use_split_accumulator=dgrad_gemm_use_split_accumulator,
                 ub=ub_obj_dgrad,
                 ub_type=ub_type_dgrad,
                 extra_output=rs_out,
@@ -603,6 +621,12 @@ class _LayerNormLinear(torch.autograd.Function):
 
                 # wgrad GEMM
                 # Note: Fuse with bgrad computation if needed
+                wgrad_gemm_use_split_accumulator = _2X_ACC_WGRAD
+                if ctx.fp8:
+                    recipe = FP8GlobalStateManager.get_fp8_recipe()
+                    if hasattr(recipe, 'fp8_gemm_wgrad'):
+                        wgrad_gemm_use_split_accumulator = recipe.fp8_gemm_wgrad.use_split_accumulator
+
                 wgrad, grad_bias_, *_, rs_out = general_gemm(
                     ln_out_total,
                     grad_output,
@@ -614,7 +638,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     ),
                     bias=(bias if (grad_bias is None and not ctx.fp8) else None),
                     out=main_grad if ctx.fuse_wgrad_accumulation else None,
-                    use_split_accumulator=_2X_ACC_WGRAD,
+                    use_split_accumulator=wgrad_gemm_use_split_accumulator,
                     accumulate=accumulate_wgrad_into_param_main_grad,
                     ub=ub_obj_wgrad,
                     ub_type=ub_type_wgrad,

@@ -403,3 +403,245 @@ class TestFP8RecipeLinearBase:
                     bgrad, recipe2_golden_tensors["bgrad"], atol=0.0, rtol=0.0
                 )
 
+class TestFP8RecipeLayerNormLinearBase(TestFP8RecipeLinearBase):
+
+    @staticmethod
+    def _check_golden_tensor_dumps(dump_dir, get_recipe, dims, input_dtype, use_bias, normalization):
+        recipe = get_recipe()
+        batch_size, hidden_size, out_size = dims
+        fp8_type_x = get_fp8_torch_dtype(recipe, fprop_tensor=True)
+        fp8_type_w = get_fp8_torch_dtype(recipe, fprop_tensor=True)
+        fp8_type_g = get_fp8_torch_dtype(recipe, fprop_tensor=False)
+
+        # Expected tensor names based on the naming template
+        scaling_type = (  # Assuming the scaling type is PER_TENSOR for this example
+            "ScalingType.PER_TENSOR"
+        )
+        current_seed = torch.initial_seed()  # Get the current seed
+
+        expected_tensor_names = {
+            "y": f"y_{normalization}_{scaling_type}_{batch_size}_{hidden_size}_{out_size}_{current_seed}_{input_dtype}_{fp8_type_x}_{fp8_type_w}_{fp8_type_g}.pt",
+            "ln_out": f"ln_out_{normalization}_{scaling_type}_{batch_size}_{hidden_size}_{out_size}_{current_seed}_{input_dtype}_{fp8_type_x}_{fp8_type_w}_{fp8_type_g}.pt",
+            "dgrad": f"dgrad_{normalization}_{scaling_type}_{batch_size}_{hidden_size}_{out_size}_{current_seed}_{input_dtype}_{fp8_type_x}_{fp8_type_w}_{fp8_type_g}.pt",
+            "wgrad": f"wgrad_{normalization}_{scaling_type}_{batch_size}_{hidden_size}_{out_size}_{current_seed}_{input_dtype}_{fp8_type_x}_{fp8_type_w}_{fp8_type_g}.pt",
+            "bgrad": f"bgrad_{normalization}_{scaling_type}_{batch_size}_{hidden_size}_{out_size}_{current_seed}_{input_dtype}_{fp8_type_x}_{fp8_type_w}_{fp8_type_g}.pt",
+        }
+
+        if not use_bias:
+            expected_tensor_names.pop("bgrad")
+
+        # Check if all expected tensors are in the tensor dumps directory
+        tensor_map = {}
+        for tensor_key, tensor_name in expected_tensor_names.items():
+            tensor_path = dump_dir / tensor_name
+            if not os.path.exists(tensor_path):
+                print(f"Missing tensor: {tensor_name}")
+                return None
+
+            # Load the tensor
+            tensor_map[tensor_key] = torch.load(tensor_path)
+        return tensor_map
+
+    @classmethod
+    def run_linear_one_step(cls, layer, x, gradient, is_first_microbatch=None):
+        # reset gradients
+        layer.zero_grad()
+        x.grad = None
+
+        # Forward pass
+        y_q, ln_out = layer.forward(x, is_first_microbatch=is_first_microbatch)
+
+        # Backward pass
+        y_q.backward(gradient)
+
+        # Collect gradients
+        dgrad = x.grad
+
+        parameters = layer._parameters
+
+        # bias and weight gradients
+        bgrad = (
+            parameters["bias"].grad
+            if parameters.get("bias", None) is not None
+            else None
+        )
+        assert "weight" in parameters
+        wgrad = parameters["weight"].grad
+
+        return y_q, ln_out, dgrad, wgrad, bgrad
+    
+    @classmethod
+    def run_linear_multiple_steps(cls, layer, x, gradient, run_num_steps, enable_weight_cache, fuse_wgrad_accumulation=False):
+        # raise error, no test case for multiple steps for now
+        raise NotImplementedError("LayerNormLinear does not support test multiple steps for now")
+    
+    @classmethod
+    def run_layernorm_linear(
+        cls,
+        x,
+        w,
+        bias,
+        gradient,
+        parallel_mode=None,
+        sequence_parallel=False,
+        tp_group=None,
+        tp_size=1,
+        rank=0,
+        run_num_steps=1,
+        enable_weight_cache=False,
+        LayerNormLinearClass=te.LayerNormLinear,
+        normalization="LayerNorm",
+    ):
+        """
+        If Model parallel, split inputs for a given rank and return the gathered output and gradients, so that they can be compared with
+        the reference single GPU run.
+        """
+        # clone inputs and move to current device
+        # w has shape [N, K], x has shape [M, K], gradient has shape [M, N]
+        x = x.clone().detach().requires_grad_(True).to("cuda")
+        w = w.clone().detach().to("cuda")
+        gradient = gradient.clone().detach().to("cuda")
+        bias = bias.clone().detach().to("cuda") if bias is not None else None
+        in_features = x.shape[1]
+        out_features = w.shape[0]
+
+        # If Model parallel: split inputs for a given rank
+        x, w, bias, gradient = cls.run_linear_preprocess_parallel(
+            x, w, bias, gradient, parallel_mode, sequence_parallel, tp_size, rank
+        )
+
+        # set data types
+        params_dtype = x.dtype
+
+        # Create linear layer and copy weights
+        layer = LayerNormLinearClass(
+            in_features,
+            out_features,
+            bias=bias is not None,
+            params_dtype=params_dtype,
+            parallel_mode=parallel_mode,
+            sequence_parallel=sequence_parallel,
+            tp_group=tp_group,
+            tp_size=tp_size,
+            normalization=normalization,
+            return_layernorm_output=True,
+        )
+
+        layer = layer.to("cuda")
+
+        # Copy weights
+        # kitchen_linear has different parameter names
+        with torch.no_grad():
+            layer.weight.copy_(w)
+            if bias is not None:
+                layer.bias.copy_(bias)
+
+        # Run one step
+        y_q, ln_out, dgrad, wgrad, bgrad = cls.run_linear_one_step(layer, x, gradient)
+
+        # If Model parallel: gather output and gradients from all ranks
+        y_q, dgrad, wgrad, bgrad = cls.run_linear_postprocess_parallel(
+            y_q,
+            dgrad,
+            wgrad,
+            bgrad,
+            parallel_mode,
+            sequence_parallel,
+            tp_size,
+            tp_group,
+        )
+
+        return y_q, ln_out, dgrad, wgrad, bgrad
+
+    def compare_recipe(
+        self,
+        recipe1,
+        recipe2,
+        batch_size,
+        hidden_size,
+        out_size,
+        use_bias,
+        seed,
+        dtype,
+        y_error=0.0,
+        ln_out_error=0.0,
+        dgrad_error=0.0,
+        wgrad_error=0.0,
+        bgrad_error=0.0,
+        normalization="LayerNorm",
+        LayerNormLinearClass1=te.LayerNormLinear,
+        LayerNormLinearClass2=te.LayerNormLinear,
+        recipe1_golden_tensors=None,
+        recipe2_golden_tensors=None,
+    ):
+        x, w, bias, gradient = self._prepare_data(
+            batch_size, hidden_size, out_size, use_bias, seed=seed, dtype=dtype
+        )
+
+        # recipe1
+        using_fp8_recipe = recipe1 != GetRecipes.none
+        if using_fp8_recipe:
+            with fp8_autocast(enabled=True, fp8_recipe=recipe1()):
+                y_q_ref, ln_out_ref, dgrad_ref, wgrad_ref, bgrad_ref = self.run_layernorm_linear(
+                    x,
+                    w,
+                    bias,
+                    gradient,
+                    normalization=normalization,
+                    LayerNormLinearClass=LayerNormLinearClass1,
+                )
+        else:
+            y_q_ref, ln_out_ref, dgrad_ref, wgrad_ref, bgrad_ref = self.run_layernorm_linear(
+                x,
+                w,
+                bias,
+                gradient,
+                normalization=normalization,
+                LayerNormLinearClass=LayerNormLinearClass1,
+            )
+
+        # recipe2
+        using_fp8_recipe = recipe2 != GetRecipes.none
+        if using_fp8_recipe:
+            with fp8_autocast(enabled=True, fp8_recipe=recipe2()):
+                y_q, ln_out, dgrad, wgrad, bgrad = self.run_layernorm_linear(
+                    x,
+                    w,
+                    bias,
+                    gradient,
+                    normalization=normalization,
+                    LayerNormLinearClass=LayerNormLinearClass2,
+                )
+        else:
+            y_q, ln_out, dgrad, wgrad, bgrad = self.run_layernorm_linear(
+                x,
+                w,
+                bias,
+                gradient,
+                normalization=normalization,
+                LayerNormLinearClass=LayerNormLinearClass2,
+            )
+
+        # Compare results (mean abs relative error)
+        assert self._get_mean_abs_relative_error(y_q, y_q_ref).item() < y_error, "y and y_ref has too large mean abs relative error"
+        assert self._get_mean_abs_relative_error(ln_out, ln_out_ref).item() < ln_out_error, "ln_out and ln_out_ref has too large mean abs relative error"
+        assert self._get_mean_abs_relative_error(dgrad, dgrad_ref) < dgrad_error, "dgrad and dgrad_ref has too large mean abs relative error"
+        assert self._get_mean_abs_relative_error(wgrad, wgrad_ref).item() < wgrad_error, "wgrad and wgrad_ref has too large mean abs relative error"
+        if use_bias:
+            assert self._get_mean_abs_relative_error(bgrad, bgrad_ref).item() < bgrad_error, "bgrad and bgrad_ref has too large mean abs relative error"
+
+        # enforce zero tolerance check when we can find golden tensor value dump
+        if recipe2_golden_tensors is not None:
+            torch.testing.assert_close(
+                y_q.float(), recipe2_golden_tensors["y"].float(), atol=0, rtol=0.0
+            )
+            torch.testing.assert_close(ln_out, recipe2_golden_tensors["ln_out"], atol=0.0, rtol=0.0)
+            torch.testing.assert_close(dgrad, recipe2_golden_tensors["dgrad"], atol=0.0, rtol=0.0)
+            torch.testing.assert_close(wgrad, recipe2_golden_tensors["wgrad"], atol=0.0, rtol=0.0)
+            if use_bias:
+                torch.testing.assert_close(
+                    bgrad, recipe2_golden_tensors["bgrad"], atol=0.0, rtol=0.0
+                )
+
+
+
