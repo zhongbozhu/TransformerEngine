@@ -2,18 +2,23 @@
 #
 # See LICENSE for license information.
 
-from typing import Iterable, Optional
+import pathlib
 import os
 import torch
+import pytest
 
 import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
 
 import transformer_engine_torch as tex
-
+from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.common.recipe import PerTensorCurrentScaling
 from transformer_engine.pytorch.fp8 import fp8_autocast, get_fp8_torch_dtype
 
+TENSOR_DUMP_DIR = pathlib.Path(__file__).resolve().parent.parent.parent / "tensor_dumps"
+
+# Check if FP8 is supported
+fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 
 class GetRecipes:
 
@@ -644,4 +649,122 @@ class TestFP8RecipeLayerNormLinearBase(TestFP8RecipeLinearBase):
                 )
 
 
+# FP8 per tesnor current scaling
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+class TestFP8CurrentScalingRecipeLinear(TestFP8RecipeLinearBase):
 
+    @staticmethod
+    def setup_class(cls) -> None:
+        # Configure RNG
+        seed = 1234
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed(seed)
+
+    @pytest.mark.parametrize(
+        "batch_size, hidden_size, out_size",
+        [
+            (16, 256, 128),
+        ],
+    )
+    @pytest.mark.parametrize("dtype", [torch.bfloat16], ids=["bf16"])
+    @pytest.mark.parametrize(
+        "recipe1, recipe2",
+        [
+            (GetRecipes.none, GetRecipes.fp8_per_tensor_current_scaling_default),
+        ],
+    )
+    def test_fp8_current_scaling_with_linear_module(
+        self,
+        recipe1,
+        recipe2,
+        batch_size,
+        hidden_size,
+        out_size,
+        dtype,
+        use_bias=True,
+    ):
+        fp8_zero_tolerance_tensor_dumps_recipe2 = None
+        # check tensor dumps dir, if the dir exists, then read files to get y, dgrad, wgrad, bgrad
+        # if we cannot get all four tensors, then still set the tensor dump to None
+        tensor_map = self._check_golden_tensor_dumps(
+            TENSOR_DUMP_DIR, recipe2, (batch_size, hidden_size, out_size), dtype, use_bias
+        )
+        if tensor_map is not None:
+            fp8_zero_tolerance_tensor_dumps_recipe2 = tensor_map
+
+        self.compare_recipe(
+            recipe1,
+            recipe2,
+            batch_size,
+            hidden_size,
+            out_size,
+            use_bias,
+            seed=torch.initial_seed(),
+            dtype=dtype,
+            y_error=0.5,
+            dgrad_error=1,
+            wgrad_error=1,
+            bgrad_error=0.5,
+            recipe1_golden_tensors=None,
+            recipe2_golden_tensors=fp8_zero_tolerance_tensor_dumps_recipe2,
+        )
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+class TestFP8CurrentScalingRecipeLayerNormLinear(TestFP8RecipeLayerNormLinearBase):
+
+    @staticmethod
+    def setup_class(cls) -> None:
+        # Configure RNG
+        seed = 1234
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed(seed)
+
+    @pytest.mark.parametrize(
+        "batch_size, hidden_size, out_size",
+        [
+            (16, 256, 128),
+        ],
+    )
+    @pytest.mark.parametrize("dtype", [torch.bfloat16], ids=["bf16"])
+    @pytest.mark.parametrize(
+        "recipe1, recipe2",
+        [
+            (GetRecipes.none, GetRecipes.fp8_per_tensor_current_scaling_default),
+        ],
+    )
+    def test_fp8_current_scaling_with_layernorm_linear_module(
+        self,
+        recipe1,
+        recipe2,
+        batch_size,
+        hidden_size,
+        out_size,
+        dtype,
+        use_bias=True,
+    ):
+        fp8_zero_tolerance_tensor_dumps_recipe2 = None
+        # check tensor dumps dir, if the dir exists, then read files to get y, dgrad, wgrad, bgrad
+        # if we cannot get all four tensors, then still set the tensor dump to None
+        tensor_map = self._check_golden_tensor_dumps(
+            TENSOR_DUMP_DIR, recipe2, (batch_size, hidden_size, out_size), dtype, use_bias, "LayerNorm"
+        )
+        if tensor_map is not None:
+            fp8_zero_tolerance_tensor_dumps_recipe2 = tensor_map
+
+        self.compare_recipe(
+            recipe1,
+            recipe2,
+            batch_size,
+            hidden_size,
+            out_size,
+            use_bias,
+            seed=torch.initial_seed(),
+            dtype=dtype,
+            y_error=0.5,
+            ln_out_error=0.5,
+            dgrad_error=1,
+            wgrad_error=1,
+            bgrad_error=0.5,
+            recipe1_golden_tensors=None,
+            recipe2_golden_tensors=fp8_zero_tolerance_tensor_dumps_recipe2,
+        )
