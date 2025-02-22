@@ -367,37 +367,3 @@ class TestCurrentScalingFloat8Tensor:
         # Make sure we are not trivially passing the test
         with pytest.raises(AssertionError):
             torch.testing.assert_close(x_fp8_dequantized, -x_hp, **_tols[fp8_dtype])
-
-    def test_basic_ops(
-        self,
-        dims: DimsType = 23,
-        fp8_dtype: tex.DType = tex.DType.kFloat8E4M3,
-        dtype: torch.dtype = torch.float32,
-    ) -> None:
-        """Test basic out-of-place ops"""
-        # TODO
-        pass
-
-    def test_inplace_ops(
-        self,
-        dims: DimsType = 23,
-        fp8_dtype: tex.DType = tex.DType.kFloat8E4M3,
-        dtype: torch.dtype = torch.float32,
-    ) -> None:
-        """Test in-place ops"""
-        # TODO
-        pass
-
-    def test_serialization(
-        self,
-        dims: DimsType = [2, 3, 5],
-        fp8_dtype: tex.DType = tex.DType.kFloat8E4M3,
-        dtype: torch.dtype = torch.float32,
-    ):
-        # TODO
-        pass
-
-    def test_set_data(self):
-        """Test directly setting .data attr"""
-        # TODO
-        pass

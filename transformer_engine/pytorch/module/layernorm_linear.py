@@ -55,7 +55,7 @@ from ..tensor.quantized_tensor import (
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer
 from ..cpu_offload import is_cpu_offload_enabled, set_offloading_param
-
+from transformer_engine.common.recipe import Recipe
 from ..cpp_extensions import (
     general_gemm,
 )
@@ -1112,6 +1112,18 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.fwd_ln_sm_margin = int(os.getenv("NVTE_FWD_LAYERNORM_SM_MARGIN", "0"))
         self.bwd_ln_sm_margin = int(os.getenv("NVTE_BWD_LAYERNORM_SM_MARGIN", "0"))
         self.inf_ln_sm_margin = int(os.getenv("NVTE_INF_LAYERNORM_SM_MARGIN", "0"))
+
+    def set_meta_tensor(self, fwd: bool, recipe: Recipe) -> None:
+        """Init scales and amaxes for fwd | bwd."""
+        super().set_meta_tensor(fwd, recipe)
+
+        # customize quantizers based on each recipe & layer configs
+        if FP8GlobalStateManager.get_fp8_recipe().current_scaled():
+            if fwd and self.sequence_parallel and self.parallel_mode == "column":
+                # set input_quantizer with amax reduction TP group
+                self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT].with_amax_reduction = True
+                self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT].amax_reduction_group = self.tp_group
+                self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT].amax_reduction_size = self.tp_size
 
     def reset_layer_norm_parameters(self) -> None:
         """Init LN params"""

@@ -52,6 +52,7 @@ from ..tensor.quantized_tensor import (
     prepare_for_saving,
     restore_from_saved,
 )
+from transformer_engine.common.recipe import Recipe
 
 from ..cpu_offload import is_cpu_offload_enabled, set_offloading_param
 
@@ -928,6 +929,25 @@ class Linear(TransformerEngineBaseModule):
             self.gemm_bias_unfused_add = True
         else:
             self.gemm_bias_unfused_add = False
+
+    def set_meta_tensor(self, fwd: bool, recipe: Recipe) -> None:
+        """Init scales and amaxes for fwd | bwd."""
+        super().set_meta_tensor(fwd, recipe)
+
+        # customize quantizers based on each recipe & layer configs
+        if FP8GlobalStateManager.get_fp8_recipe().current_scaled():
+            if fwd and self.sequence_parallel and self.parallel_mode == "column":
+                # customize input_quantizer with amax reduction TP group
+                self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT].with_amax_reduction = True
+                self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT].amax_reduction_group = self.tp_group
+                self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT].amax_reduction_size = self.tp_size
+            elif (not fwd) and self.sequence_parallel and self.parallel_mode == "row":
+                # customize grad_output_quantizer with amax reduction TP group
+                self.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_OUTPUT1].with_amax_reduction = True
+                self.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_OUTPUT1].amax_reduction_group = self.tp_group
+                self.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_OUTPUT1].amax_reduction_size = self.tp_size
+        # elif for other recipes (mxfp8, etc.)
+
 
     def reset_parameters(self, defer_init=False):
         super().reset_parameters(defer_init=defer_init)

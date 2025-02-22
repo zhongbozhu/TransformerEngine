@@ -164,6 +164,7 @@ void performTestCurrentScaling(const size_t N, const size_t H) {
   // compute amax
   if (is_out_fp8){
     nvte_compute_amax(input.data(), output.data(), 0);
+    nvte_compute_scale_from_amax(output.data(), 0);
   }
   // assume no amax reduction needed for now
   nvte_quantize(input.data(), output.data(), 0);

@@ -1249,8 +1249,7 @@ void fp8_quantize_compute_scale_from_amax(Tensor *output, const fp32 epsilon, cu
 
 namespace detail {
 
-template <bool NEED_AMAX_REDUCTION>
-void compute_amax_helper(const NVTETensor input, const NVTETensor output, cudaStream_t stream) {
+inline void compute_amax_helper(const NVTETensor input, const NVTETensor output, cudaStream_t stream) {
   const auto &input_tensor = *(reinterpret_cast<const Tensor *>(input));
   auto output_tensor = reinterpret_cast<Tensor *>(output);
 
@@ -1267,18 +1266,26 @@ void compute_amax_helper(const NVTETensor input, const NVTETensor output, cudaSt
     case NVTE_CURRENT_TENSOR_SCALING: {
       // for per tensor current scaling, rowwise/columnwise data are the same, just one tensor
       fp8_quantize_compute_amax(input_tensor, output_tensor, stream);
-      // Call NCCL amax reduction if needed, check with TE team about API design
-      if constexpr (NEED_AMAX_REDUCTION) {
-        NVTE_ERROR("AMAX Reduction not supported for scaling mode: " +
-                   to_string(output_tensor->scaling_mode) + ".");
-      }
-      // TODO: pass in real epsilon and max_fp8
-      fp8_quantize_compute_scale_from_amax<true>(output_tensor, 0.0f, stream);
+      // We cannot directly call fp8_quantize_compute_scale_from_amax here if we need amax reduction
+      // make sure the amax is already reduced, so we need to call fp8_quantize_compute_scale_from_amax
+      // this amax reduction should be done differently for different ML frameworks
+      // for pytorch, we need to reduce amax in its csrc quantize function
       break;
     }
     default:
       NVTE_ERROR("Not implemented scaling mode: " + to_string(output_tensor->scaling_mode) + ".");
   }
+}
+
+inline void compute_scale_helper(const NVTETensor output, cudaStream_t stream) {
+  // this should only work for current scaling
+  auto output_tensor = reinterpret_cast<Tensor *>(output);
+  // assert scaling mode is current scaling, and then call fp8_quantize_compute_scale_from_amax
+  if (output_tensor->scaling_mode != NVTE_CURRENT_TENSOR_SCALING) {
+    NVTE_ERROR("You shouldn't call compute_scale_helper for scaling mode: " + to_string(output_tensor->scaling_mode) + " because it's only for NVTE_CURRENT_TENSOR_SCALING.");
+  }
+  // TODO: pass in real epsilon, and ieee_div
+  fp8_quantize_compute_scale_from_amax<true>(output_tensor, 0.0f, stream);
 }
 
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,

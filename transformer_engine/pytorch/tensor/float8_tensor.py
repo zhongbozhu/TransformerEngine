@@ -14,6 +14,7 @@ from transformer_engine_torch import DType as TE_DType
 from ..utils import devices_match, non_tn_fp8_gemm_supported
 from ._internal.float8_tensor_base import Float8TensorBase, _FromFloat8Func
 from .quantized_tensor import QuantizedTensor, Quantizer, _IdentityFunc
+from ..constants import dist_group_type
 
 aten = torch.ops.aten
 
@@ -198,11 +199,17 @@ class Float8CurrentScalingQuantizer(Quantizer):
         *,
         rowwise: bool = True,
         columnwise: bool = True,
+        with_amax_reduction: bool = False,
+        amax_reduction_group: Optional[dist_group_type] = None,
+        amax_reduction_size: Optional[int] = 1,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
         self.scale = torch.empty(1, dtype=torch.float32, device=device)
         self.amax = torch.empty(1, dtype=torch.float32, device=device)
         self.dtype = fp8_dtype
+        self.with_amax_reduction = with_amax_reduction
+        self.amax_reduction_group = amax_reduction_group
+        self.amax_reduction_size = amax_reduction_size
 
     def update_quantized(
         self,

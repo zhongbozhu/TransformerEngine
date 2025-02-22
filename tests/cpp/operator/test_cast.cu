@@ -161,6 +161,7 @@ void performTestCurrentScaling(const std::vector<size_t>& shape) {
   // compute amax
   if (is_out_fp8){
     nvte_compute_amax(input.data(), output_c.data(), 0);
+    nvte_compute_scale_from_amax(output_c.data(), 0);
   }
   // assume no amax reduction needed for now
   nvte_quantize(input.data(), output_c.data(), 0);
