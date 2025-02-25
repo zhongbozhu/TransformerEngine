@@ -203,6 +203,11 @@ class _LayerNormLinear(torch.autograd.Function):
                 with_quantized_all_gather = False
             if fp8:
                 input_quantizer.set_usage(rowwise=True, columnwise=False)
+            # ln_out in this has two possibilities:
+            # 1. in FP8 low precision, the cast was done by fusing quantization into layernorm kernel
+            # 2. in high precision, then we need to cast it and then gather in FP8
+            # the output ln_out_total will be in FP8, and it's a full tensor 
+            # TODO: fuse current scaling quantize into layernorm kernel, so ln_out is also in FP8 => save more memory
             ln_out_total, _ = gather_along_first_dim(
                 ln_out,
                 tp_group,
@@ -352,6 +357,7 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.weight = weight
             ctx.activation_dtype = activation_dtype
             ctx.fp8 = fp8
+            ctx.fp8_recipe = FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
             ctx.fuse_wgrad_accumulation = fuse_wgrad_accumulation
             ctx.cpu_offloading = cpu_offloading
             ctx.is_first_microbatch = is_first_microbatch
@@ -417,11 +423,12 @@ class _LayerNormLinear(torch.autograd.Function):
                         ctx.ub_bulk_wgrad,
                     ]
                 )
-                and not FP8GlobalStateManager.get_fp8_recipe().delayed()
+                and (ctx.fp8_recipe is not None)
             ):
-                raise NotImplementedError(
-                    "Comm+GEMM overlap is only supported with FP8 delayed scaling"
-                )
+                if not ctx.fp8_recipe.delayed():
+                    raise NotImplementedError(
+                        "Comm+GEMM overlap is only supported with FP8 delayed scaling"
+                    )
 
             saved_tensors = ctx.saved_tensors
             (  # pylint: disable=unbalanced-tuple-unpacking
@@ -550,7 +557,7 @@ class _LayerNormLinear(torch.autograd.Function):
 
             dgrad_gemm_use_split_accumulator = _2X_ACC_DGRAD
             if ctx.fp8:
-                recipe = FP8GlobalStateManager.get_fp8_recipe()
+                recipe = ctx.fp8_recipe
                 if hasattr(recipe, 'fp8_gemm_dgrad'):
                     dgrad_gemm_use_split_accumulator = recipe.fp8_gemm_dgrad.use_split_accumulator
 
@@ -623,7 +630,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 # Note: Fuse with bgrad computation if needed
                 wgrad_gemm_use_split_accumulator = _2X_ACC_WGRAD
                 if ctx.fp8:
-                    recipe = FP8GlobalStateManager.get_fp8_recipe()
+                    recipe = ctx.fp8_recipe
                     if hasattr(recipe, 'fp8_gemm_wgrad'):
                         wgrad_gemm_use_split_accumulator = recipe.fp8_gemm_wgrad.use_split_accumulator
 

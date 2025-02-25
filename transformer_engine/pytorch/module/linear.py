@@ -269,6 +269,7 @@ class _Linear(torch.autograd.Function):
             ctx.tensor_objects = tensor_objects
 
             ctx.activation_dtype = activation_dtype
+            ctx.fp8_recipe = FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
             ctx.fp8 = fp8
             ctx.input_quantizer = input_quantizer
             ctx.grad_output_quantizer = grad_output_quantizer
@@ -329,11 +330,12 @@ class _Linear(torch.autograd.Function):
                         ctx.ub_bulk_wgrad,
                     ]
                 )
-                and not FP8GlobalStateManager.get_fp8_recipe().delayed()
+                and (ctx.fp8_recipe is not None)
             ):
-                raise NotImplementedError(
-                    "Comm+GEMM overlap is only supported with FP8 delayed scaling"
-                )
+                if not ctx.fp8_recipe.delayed():
+                    raise NotImplementedError(
+                        "Comm+GEMM overlap is only supported with FP8 delayed scaling"
+                    )
 
             saved_tensors = ctx.saved_tensors
             inputmat, weight_fp8, weight, bias = (  # pylint: disable=unbalanced-tuple-unpacking
@@ -460,7 +462,7 @@ class _Linear(torch.autograd.Function):
                 # dgrad GEMM
                 dgrad_gemm_use_split_accumulator = _2X_ACC_DGRAD
                 if ctx.fp8:
-                    recipe = FP8GlobalStateManager.get_fp8_recipe()
+                    recipe = ctx.fp8_recipe
                     if hasattr(recipe, 'fp8_gemm_dgrad'):
                         dgrad_gemm_use_split_accumulator = recipe.fp8_gemm_dgrad.use_split_accumulator
 
@@ -530,7 +532,7 @@ class _Linear(torch.autograd.Function):
                 # Note: Fuse with bgrad computation if needed
                 wgrad_gemm_use_split_accumulator = _2X_ACC_WGRAD
                 if ctx.fp8:
-                    recipe = FP8GlobalStateManager.get_fp8_recipe()
+                    recipe = ctx.fp8_recipe
                     if hasattr(recipe, 'fp8_gemm_wgrad'):
                         wgrad_gemm_use_split_accumulator = recipe.fp8_gemm_wgrad.use_split_accumulator
 
