@@ -708,6 +708,12 @@ def _test_layernorm_mlp(set_parallel_mode=None, sequence_parallel=False, **kwarg
         # Duplicate input for sequence parallelism
         input_single_node = torch.empty((WORLD_SIZE * SEQ_LEN, HIDDEN_SIZE)).cuda().to(params_dtype)
         input_distributed = torch.randn((SEQ_LEN, HIDDEN_SIZE)).cuda().to(params_dtype)
+        # make the last element of the input a large value to test the amax reduction on purpose
+        # when quantization is fp8_cs, we need to trigger corner cases to see if amax reduction is working
+        if QUANTIZATION == "fp8_cs":
+            input_distributed = torch.clamp(input_distributed, min=-10, max=10)
+            if WORLD_RANK == WORLD_SIZE - 1:
+                input_distributed[SEQ_LEN-1, HIDDEN_SIZE-1] = 11
         input_single_node = _gather(input_distributed).detach()
     else:
         input_distributed = input_single_node.clone()
@@ -760,10 +766,6 @@ def test_layernorm_mlp():
         {"return_bias": True},
         {"return_layernorm_output": True},
     ]
-
-    # [DEBUG] skip this test for fp8 cs
-    if QUANTIZATION == "fp8_cs":
-        return
 
     for kwargs in kwargs_list:
         for set_parallel_mode in [True]:
@@ -859,10 +861,6 @@ def test_transformer_layer():
         {"fuse_qkv_params": True},
         {"activation": "relu"},
     ]
-
-    # [DEBUG] skip this test for fp8 cs
-    if QUANTIZATION == "fp8_cs":
-        return
 
     for kwargs in kwargs_list:
         for sequence_parallel in [False, True]:
