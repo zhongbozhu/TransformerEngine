@@ -54,12 +54,10 @@ class QParams:
     """Quantization parameters.
     power_2_scale: use power of 2 scale parameter
     amax_epsilon: optional minimum value of abs max
-    scale_ieee_div: apply ieee_div to compute scale from amax: scale = MAX_FP8 / amax
     """
 
     power_2_scale: bool = False
     amax_epsilon: float = 0.0
-    scale_ieee_div: bool = False
 
 
 class Recipe:
@@ -197,11 +195,11 @@ class PerTensorCurrentScaling(Recipe):
     fp8_format : {Format.E4M3, Format.HYBRID}, default = Format.HYBRID
                 Controls the FP8 data format used during forward and backward
                 pass.
-    fp8_quant_fwd_inp: QParams, default QParams{power_2_scale=False, scale_ieee_div=False, amax_epsilon=0.0}
+    fp8_quant_fwd_inp: QParams, default QParams{power_2_scale=False, amax_epsilon=0.0}
                     used for quantization of input tensor x
-    fp8_quant_fwd_weight: QParams, default QParams{power_2_scale=False, scale_ieee_div=False, amax_epsilon=0.0}
+    fp8_quant_fwd_weight: QParams, default QParams{power_2_scale=False, amax_epsilon=0.0}
                     used for quantization of weight tensor w
-    fp8_quant_bwd_grad: QParams, default QParams{power_2_scale=False, scale_ieee_div=False, amax_epsilon=0.0}
+    fp8_quant_bwd_grad: QParams, default QParams{power_2_scale=False, amax_epsilon=0.0}
                     used for quantization of gradient tensor dY
     fp8_gemm_fprop: MMParams, default MMParams.use_split_accumulator=False
                     used for calculating output y in forward pass
@@ -231,9 +229,9 @@ class PerTensorCurrentScaling(Recipe):
     """
 
     fp8_format: Format = Format.HYBRID
-    fp8_quant_fwd_inp = QParams(power_2_scale=False, scale_ieee_div=False, amax_epsilon=0.0)
-    fp8_quant_fwd_weight = QParams(power_2_scale=False, scale_ieee_div=False, amax_epsilon=0.0)
-    fp8_quant_bwd_grad = QParams(power_2_scale=False, scale_ieee_div=False, amax_epsilon=0.0)
+    fp8_quant_fwd_inp = QParams(power_2_scale=False, amax_epsilon=0.0)
+    fp8_quant_fwd_weight = QParams(power_2_scale=False, amax_epsilon=0.0)
+    fp8_quant_bwd_grad = QParams(power_2_scale=False, amax_epsilon=0.0)
     fp8_gemm_fprop: MMParams = MMParams(use_split_accumulator=True)
     fp8_gemm_dgrad: MMParams = MMParams(use_split_accumulator=True)
     fp8_gemm_wgrad: MMParams = MMParams(use_split_accumulator=True)

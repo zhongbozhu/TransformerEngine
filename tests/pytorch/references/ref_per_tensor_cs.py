@@ -17,7 +17,10 @@ def _ref_compute_amax_scale(x, quant_dtype, eps, pow_2_scales):
     scale = torch.div(fp8_max, amax)
     # Note frexp doesn't give back inf for exponent with an inf input
     # We take care of inf before pow_2_scales
-    scale = torch.where(scale == torch.inf, torch.finfo(x.dtype).max, scale)
+    # option1: set scale to inp max when scale is inf
+    # scale = torch.where(scale == torch.inf, torch.finfo(x.dtype).max, scale)
+    # option2: when scale is inf, set scale to 1
+    scale = torch.where(scale == torch.inf, 1.0, scale)
     if pow_2_scales:
         # Calculate rounded down exponent
         _, exp = torch.frexp(scale)
@@ -72,14 +75,16 @@ def ref_per_tensor_cs_cast(
     tensor: torch.Tensor,
     fp8_dtype: tex.DType = tex.DType.kFloat8E4M3,
     return_transpose: bool = False,
+    force_pow_2_scales: bool = False,
+    amax_epsilon: float = 0.0,
 ) -> torch.Tensor:
 
     quant_dtype_torch = TE_DType_To_Torch[fp8_dtype]
     scale, scale_inv, _ = _ref_compute_amax_scale(
         tensor,
         quant_dtype_torch,
-        0.0,
-        False,
+        amax_epsilon,
+        force_pow_2_scales,
     )
 
     qx = (tensor.float() * scale).to(quant_dtype_torch)

@@ -84,6 +84,13 @@ struct Tensor {
   SimpleTensor columnwise_scale_inv;
 
   NVTEScalingMode scaling_mode;
+  
+  // FP8 quantization options
+  // Options about how to quantize the tensor
+  // Quantization scales are rounded down to powers of 2.
+  bool force_pow_2_scales = false;
+  // Amax within quantization tile has a floor of epsilon.
+  float amax_epsilon = 0.0;
 
   Tensor()
       : data(),
@@ -92,7 +99,9 @@ struct Tensor {
         scale(nullptr, {1}, DType::kFloat32),
         scale_inv(nullptr, {1}, DType::kFloat32),
         columnwise_scale_inv(nullptr, {1}, DType::kFloat32),
-        scaling_mode(NVTE_DELAYED_TENSOR_SCALING) {}
+        scaling_mode(NVTE_DELAYED_TENSOR_SCALING),
+        force_pow_2_scales(false),
+        amax_epsilon(0.0) {}
 
   int numel() const {
     NVTE_CHECK(data.dptr != nullptr || columnwise_data.dptr != nullptr,
@@ -114,6 +123,24 @@ struct Tensor {
   bool has_data() const noexcept { return data.dptr != nullptr; }
 
   bool has_columnwise_data() const noexcept { return columnwise_data.dptr != nullptr; }
+
+  bool supports_force_pow_2_scales_qopt() const noexcept {
+    switch (scaling_mode) {
+      case NVTE_CURRENT_TENSOR_SCALING:
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  bool supports_amax_epsilon_qopt() const noexcept {
+    switch (scaling_mode) {
+      case NVTE_CURRENT_TENSOR_SCALING:
+        return true;
+      default:
+        return false;
+    }
+  }
 
   DType dtype() const {
     if (has_data()) return data.dtype;
@@ -395,6 +422,19 @@ struct TypeInfo {
     default: {                                                      \
       NVTE_ERROR("Invalid size of the MX scaling factor.");         \
     }                                                               \
+  }
+
+#define TRANSFORMER_ENGINE_SWITCH_CONDITION(CONDITION, FLAG, ...) \
+  if (CONDITION) {                                                \
+    constexpr bool FLAG = true;                                   \
+    {                                                             \
+      __VA_ARGS__                                                 \
+    }                                                             \
+  } else {                                                        \
+    constexpr bool FLAG = false;                                  \
+    {                                                             \
+      __VA_ARGS__                                                 \
+    }                                                             \
   }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////

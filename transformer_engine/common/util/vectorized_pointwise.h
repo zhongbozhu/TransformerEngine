@@ -409,7 +409,7 @@ void VectorizedUnaryGradKernelLauncher(const InputTypeGrad *grad, const InputTyp
   }
 }
 
-template <bool USE_IEEE_DIV>
+template <bool kPow2Scaling>
 __device__ __forceinline__ void compute_scale_from_amax(fp32 amax, fp32 *scale_ptr,
                                                         fp32 *scale_inv_ptr, const fp32 max_fp8,
                                                         const fp32 epsilon) {
@@ -427,11 +427,7 @@ __device__ __forceinline__ void compute_scale_from_amax(fp32 amax, fp32 *scale_p
     return;
   }
 
-  if constexpr (USE_IEEE_DIV) {
-    scale = max_fp8 / clamp_amax;
-  } else {
-    scale = __fdividef(max_fp8, clamp_amax);
-  }
+  scale = max_fp8 / clamp_amax;
 
   // The amax is too small that the scale becoming infinite in FP32. In other word,
   // the scale is not representable in FP32.
@@ -443,23 +439,32 @@ __device__ __forceinline__ void compute_scale_from_amax(fp32 amax, fp32 *scale_p
     scale = 1.f;
   }
 
+  if constexpr (kPow2Scaling) {
+    uint32_t scale_bits = *reinterpret_cast<uint32_t*>(&scale);
+    scale_bits &= 0xFF800000;
+    // If the exponent was zero, we have a logic error.
+    __builtin_assume(scale_bits != 0);
+    __builtin_assume(scale_bits != 0x80000000);
+    scale = *reinterpret_cast<float*>(&scale_bits);
+  }
+
   scale_inv = 1.0f / scale;
 
   *scale_ptr = scale;
   *scale_inv_ptr = scale_inv;
 }
 
-template <bool USE_IEEE_DIV>
+template <bool kPow2Scaling>
 __global__ void compute_scale_from_amax_kernel(fp32 *amax_ptr, fp32 *scale_ptr, fp32 *scale_inv_ptr,
                                                const fp32 max_fp8, const fp32 epsilon) {
-  compute_scale_from_amax<USE_IEEE_DIV>(*amax_ptr, scale_ptr, scale_inv_ptr, max_fp8, epsilon);
+  compute_scale_from_amax<kPow2Scaling>(*amax_ptr, scale_ptr, scale_inv_ptr, max_fp8, epsilon);
 }
 
-template <bool USE_IEEE_DIV>
+template <bool kPow2Scaling>
 void ComputeScaleFromAmaxKernelLauncher(fp32 *amax_ptr, fp32 *scale_ptr, fp32 *scale_inv_ptr,
                                         const fp32 max_fp8, const fp32 epsilon,
                                         cudaStream_t stream) {
-  compute_scale_from_amax_kernel<USE_IEEE_DIV>
+  compute_scale_from_amax_kernel<kPow2Scaling>
       <<<1, 1, 0, stream>>>(amax_ptr, scale_ptr, scale_inv_ptr, max_fp8, epsilon);
 }
 

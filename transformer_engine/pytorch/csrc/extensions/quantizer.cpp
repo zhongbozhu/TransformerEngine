@@ -161,6 +161,10 @@ Float8CurrentScalingQuantizer::Float8CurrentScalingQuantizer(const py::handle& q
   this->with_amax_reduction = with_amax_reduction;
   this->amax_reduction_group = amax_reduction_group;
   this->amax_reduction_size = amax_reduction_size;
+
+  // fp8 current scaling specific quantization params
+  this->force_pow_2_scales = quantizer.attr("force_pow_2_scales").cast<bool>();
+  this->amax_epsilon = quantizer.attr("amax_epsilon").cast<float>();
 }
 
 void Float8CurrentScalingQuantizer::set_quantization_params(TensorWrapper* tensor) const {
@@ -181,6 +185,8 @@ void Float8CurrentScalingQuantizer::set_quantization_params(TensorWrapper* tenso
                            rowwise_data.shape);
   tensor->set_columnwise_data(columnwise_data.data_ptr, static_cast<DType>(columnwise_data.dtype),
                               columnwise_data.shape);
+  tensor->set_qopt_force_pow_2_scales(force_pow_2_scales);
+  tensor->set_qopt_amax_epsilon(amax_epsilon);
 }
 
 std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_tensor(

@@ -412,3 +412,34 @@ void nvte_zero_tensor(const NVTETensor tensor, cudaStream_t stream) {
   }
   cudaStreamSynchronize(stream);
 }
+
+int nvte_set_qopt_force_pow_2_scales(NVTETensor tensor, int zero_if_false) {
+  auto &t = *reinterpret_cast<transformer_engine::Tensor *>(tensor);
+  if (t.supports_force_pow_2_scales_qopt()) {
+    t.force_pow_2_scales = zero_if_false != 0;
+    return 0;
+  } else {
+    return 1;
+  }
+}
+
+int nvte_set_qopt_amax_epsilon(NVTETensor tensor, float amax_epsilon) {
+  auto &t = *reinterpret_cast<transformer_engine::Tensor *>(tensor);
+  if (t.supports_amax_epsilon_qopt()) {
+    t.amax_epsilon = amax_epsilon;
+    return 0;
+  } else {
+    return 1;
+  }
+}
+
+int nvte_get_qopt_force_pow_2_scales(const NVTETensor tensor) {
+  const auto &t = *reinterpret_cast<const transformer_engine::Tensor *>(tensor);
+  return t.force_pow_2_scales ? 1 : 0;
+}
+
+float nvte_get_qopt_amax_epsilon(const NVTETensor tensor) {
+  const auto &t = *reinterpret_cast<const transformer_engine::Tensor *>(tensor);
+  return t.amax_epsilon;
+}
+
