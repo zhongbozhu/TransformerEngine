@@ -286,8 +286,8 @@ class Float8CurrentScalingQuantizer(Quantizer):
         )
 
     def calibrate(self, tensor: torch.Tensor) -> None:
-        amin, amax = tensor.aminmax()
-        self.amax.copy_(torch.max(-amin, amax))
+        # current scaling don't need to calibrate
+        return
 
     def create_tensor_from_data(
         self,
