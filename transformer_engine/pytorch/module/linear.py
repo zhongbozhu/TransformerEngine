@@ -938,8 +938,8 @@ class Linear(TransformerEngineBaseModule):
 
         # customize quantizers based on each recipe & layer configs
         recipe = FP8GlobalStateManager.get_fp8_recipe()
-        if recipe.current_scaled():
-            self._customize_quantizers_current_scaled(fwd, recipe)
+        if recipe.float8_current_scaling():
+            self._customize_quantizers_float8_current_scaling(fwd, recipe)
         # elif for other recipes (mxfp8, etc.)
 
 
@@ -1107,9 +1107,9 @@ class Linear(TransformerEngineBaseModule):
             grad_input_quantizer,
         )
 
-    def _customize_quantizers_current_scaled(self, fwd: bool, recipe: Recipe) -> None:
+    def _customize_quantizers_float8_current_scaling(self, fwd: bool, recipe: Recipe) -> None:
         """Customize quantizers based on current scaling recipe + linear. """
-        assert recipe.current_scaled(), "current scaling recipe quantizer customization here"
+        assert recipe.float8_current_scaling(), "current scaling recipe quantizer customization here"
         if fwd:
             # set configs about amax epsilon and power_2_scale
             self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT].force_pow_2_scales = recipe.fp8_quant_fwd_inp.power_2_scale

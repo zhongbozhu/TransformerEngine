@@ -18,7 +18,7 @@ from transformer_engine.common.recipe import (
     DelayedScaling,
     Format,
     MXFP8BlockScaling,
-    PerTensorCurrentScaling,
+    Float8CurrentScaling,
 )
 
 from .constants import dist_group_type
@@ -756,8 +756,8 @@ class RecipeState(abc.ABC):
             cls = DelayedScalingRecipeState
         elif recipe.mxfp8():
             cls = MXFP8BlockScalingRecipeState
-        elif recipe.current_scaled():
-            cls = PerTensorCurrentScalingRecipeState
+        elif recipe.float8_current_scaling():
+            cls = Float8CurrentScalingRecipeState
         else:
             raise ValueError("{recipe.__class__.__name__} is not supported")
         return cls(
@@ -828,21 +828,21 @@ class DelayedScalingRecipeState(RecipeState):
         ]
 
 
-class PerTensorCurrentScalingRecipeState(RecipeState):
+class Float8CurrentScalingRecipeState(RecipeState):
     """Configuration for Per-tensor current scaling quantization.
 
     Per-tensor current quantization does not require state.
 
     """
 
-    recipe: PerTensorCurrentScaling
+    recipe: Float8CurrentScaling
     mode: str
     dtype: tex.DType
     device: torch.device
 
     def __init__(
         self,
-        recipe: PerTensorCurrentScaling,
+        recipe: Float8CurrentScaling,
         *,
         mode: str,
         num_quantizers: int = 1,

@@ -18,7 +18,7 @@ import transformer_engine_torch as tex
 from transformer_engine.common.recipe import (
     MXFP8BlockScaling,
     DelayedScaling,
-    PerTensorCurrentScaling,
+    Float8CurrentScaling,
     Format,
     Recipe,
 )
@@ -48,7 +48,7 @@ def quantization_recipe() -> Recipe:
     if QUANTIZATION == "mxfp8":
         return MXFP8BlockScaling()
     if QUANTIZATION == "fp8_cs":
-        return PerTensorCurrentScaling()
+        return Float8CurrentScaling()
     return te.fp8.get_default_fp8_recipe()
 
 

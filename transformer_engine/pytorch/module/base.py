@@ -24,7 +24,7 @@ from ._common import _ParameterInitMeta
 from ..fp8 import (
     MXFP8BlockScalingRecipeState,
     DelayedScalingRecipeState,
-    PerTensorCurrentScalingRecipeState,
+    Float8CurrentScalingRecipeState,
     FP8GlobalStateManager,
     RecipeState,
 )
@@ -550,8 +550,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 return
             if recipe.mxfp8() and isinstance(recipe_state, MXFP8BlockScalingRecipeState):
                 return
-            if recipe.current_scaled() and isinstance(
-                recipe_state, PerTensorCurrentScalingRecipeState
+            if recipe.float8_current_scaling() and isinstance(
+                recipe_state, Float8CurrentScalingRecipeState
             ):
                 return
 

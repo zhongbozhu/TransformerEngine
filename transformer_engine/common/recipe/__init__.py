@@ -73,9 +73,9 @@ class Recipe:
         """Whether the given recipe is delayed scaling."""
         return isinstance(self, DelayedScaling)
 
-    def current_scaled(self):
+    def float8_current_scaling(self):
         """Whether the given recipe is (per-tensor) current scaling."""
-        return isinstance(self, PerTensorCurrentScaling)
+        return isinstance(self, Float8CurrentScaling)
 
 
 @dataclass()
@@ -187,7 +187,7 @@ class DelayedScaling(Recipe):
 
 
 @dataclass()
-class PerTensorCurrentScaling(Recipe):
+class Float8CurrentScaling(Recipe):
     """
     Use the per-tensor current scaling factor strategy.
     Parameters

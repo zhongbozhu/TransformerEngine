@@ -12,7 +12,7 @@ import transformer_engine_torch as tex
 
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
-from transformer_engine.common.recipe import PerTensorCurrentScaling
+from transformer_engine.common.recipe import Float8CurrentScaling
 from transformer_engine.pytorch.fp8 import fp8_autocast, get_fp8_torch_dtype
 
 TENSOR_DUMP_DIR = pathlib.Path(__file__).resolve().parent.parent.parent / "tensor_dumps"
@@ -29,7 +29,7 @@ class GetRecipes:
     @staticmethod
     def fp8_per_tensor_current_scaling_default():
         # return default configs
-        return PerTensorCurrentScaling()
+        return Float8CurrentScaling()
 
 
 # base class for validating current_scaling x linear layer
