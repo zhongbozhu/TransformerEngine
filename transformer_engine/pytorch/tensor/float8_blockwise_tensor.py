@@ -32,6 +32,8 @@ class Float8BlockQuantizer(Quantizer):
     amax_epsilon: float
     force_pow_2_scales: bool
     block_scaling_dim: int
+    columnwise_transpose: bool
+    compact_scales: bool
 
     def __init__(
         self,
@@ -42,6 +44,8 @@ class Float8BlockQuantizer(Quantizer):
         amax_epsilon: float = 0.0,
         force_pow_2_scales: bool = True,
         block_scaling_dim: int = 2,
+        columnwise_transpose: bool = True,
+        compact_scales: bool = False,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
         self.dtype = fp8_dtype
@@ -49,6 +53,8 @@ class Float8BlockQuantizer(Quantizer):
         self.force_pow_2_scales = force_pow_2_scales
         self.amax_epsilon = amax_epsilon
         self.block_scaling_dim = block_scaling_dim
+        self.columnwise_transpose = columnwise_transpose
+        self.compact_scales = compact_scales
 
     def update_quantized(
         self,
@@ -136,10 +142,10 @@ class Float8BlockQuantizer(Quantizer):
         assert self.block_scaling_dim == 1, "Only 1D or 2D blocks supported"
         if columnwise:
             outer = math.ceil(M / self.block_len)
-            inner = round_up_to_nearest_multiple(K, 4)
+            inner = round_up_to_nearest_multiple(K, 4) if not self.compact_scales else K
             return (outer, inner)
         outer = math.ceil(K / self.block_len)
-        inner = round_up_to_nearest_multiple(M, 4)
+        inner = round_up_to_nearest_multiple(M, 4) if not self.compact_scales else M
         return (outer, inner)
 
     def get_columnwise_shape(self, shape: Iterable[int]) -> Tuple[int, ...]:
@@ -162,6 +168,8 @@ class Float8BlockQuantizer(Quantizer):
         """
         if len(shape) == 0:
             return tuple()
+        if not self.columnwise_transpose:
+            return shape
         colwise_shape = [shape[-1]]
         for i in range(len(shape) - 1):
             colwise_shape.append(shape[i])
