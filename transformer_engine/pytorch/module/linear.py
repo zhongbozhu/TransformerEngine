@@ -158,7 +158,7 @@ class _Linear(torch.autograd.Function):
                     # For 1xN blockwise scaling, like Float8 block scaling and MXFP8
                     # quantizer quantize in both rowwise and columnwise usages in training
                     # But we only only gather the rowwise data, cache columnwise data for bwd
-                    # The columnwise data should be untransposed before gather, and transposed 
+                    # The columnwise data should be untransposed before gather, and transposed
                     # before wgrad GEMM
                     columnwise_usage = backward_needs_input and isinstance(
                         input_quantizer, (MXFP8Quantizer, Float8BlockQuantizer)
@@ -294,7 +294,10 @@ class _Linear(torch.autograd.Function):
                     # For sequence parallel in vanilla FP8, rowwise data is
                     # to gather the input. For MXFP8, columnwise only data
                     # can be allgathered.
-                    if isinstance(inputmat, (MXFP8TensorBase, Float8BlockwiseQTensorBase)) or not ctx.backward_input_needs_gather:
+                    if (
+                        isinstance(inputmat, (MXFP8TensorBase, Float8BlockwiseQTensorBase))
+                        or not ctx.backward_input_needs_gather
+                    ):
                         inputmat.update_usage(rowwise_usage=False, columnwise_usage=True)
                 saved_inputmat = inputmat
 
@@ -1369,16 +1372,16 @@ class Linear(TransformerEngineBaseModule):
         assert (
             recipe.float8_block_scaling()
         ), "blockwise scaling recipe quantizer customization here"
-        
+
         if fwd:
             if self.sequence_parallel and self.parallel_mode == "column":
                 # set compact for inp tensor X
-                self.quantizers["scaling_fwd"][
-                    tex.FP8FwdTensors.GEMM1_INPUT
-                ].set_usage(need_compact=True)
+                self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT].set_usage(
+                    need_compact=True
+                )
         else:
             if self.sequence_parallel and self.parallel_mode == "row":
                 # set compact for grad_output tensor dY
-                self.quantizers["scaling_bwd"][
-                    tex.FP8BwdTensors.GRAD_OUTPUT1
-                ].set_usage(need_compact=True)
+                self.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_OUTPUT1].set_usage(
+                    need_compact=True
+                )

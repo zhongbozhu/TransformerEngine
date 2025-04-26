@@ -184,9 +184,7 @@ class _LayerNormLinear(torch.autograd.Function):
             input_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
 
         with_quantized_norm = (
-            fp8
-            and not return_layernorm_output
-            and not return_layernorm_output_gathered
+            fp8 and not return_layernorm_output and not return_layernorm_output_gathered
         )
 
         # Apply normalization
@@ -343,7 +341,10 @@ class _LayerNormLinear(torch.autograd.Function):
                     # For sequence parallel in vanilla FP8, rowwise data is
                     # to gather the input. For MXFP8, columnwise only data
                     # can be allgathered.
-                    if isinstance(ln_out, (MXFP8TensorBase, Float8BlockwiseQTensorBase)) or not ctx.ln_out_needs_gather:
+                    if (
+                        isinstance(ln_out, (MXFP8TensorBase, Float8BlockwiseQTensorBase))
+                        or not ctx.ln_out_needs_gather
+                    ):
                         ln_out.update_usage(rowwise_usage=False)
 
             # Weight with column-wise usage is needed for dgrad GEMM.
@@ -1552,7 +1553,6 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 tex.FP8BwdTensors.GRAD_OUTPUT1
             ].amax_epsilon = recipe.fp8_quant_bwd_grad.amax_epsilon
 
-
     def _customize_quantizers_float8_blockwise_scaling(self, fwd: bool, recipe: Recipe) -> None:
         """Customize quantizers based on blockwise scaling recipe + layernorm_linear."""
         assert (
@@ -1560,6 +1560,6 @@ class LayerNormLinear(TransformerEngineBaseModule):
         ), "blockwise scaling recipe quantizer customization here"
         if fwd:
             if self.sequence_parallel and self.parallel_mode == "column":
-                self.quantizers["scaling_fwd"][
-                    tex.FP8FwdTensors.GEMM1_INPUT
-                ].set_usage(need_compact=True)
+                self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT].set_usage(
+                    need_compact=True
+                )
