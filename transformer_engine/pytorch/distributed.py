@@ -22,6 +22,7 @@ import transformer_engine_torch as tex
 
 try:
     import torch.distributed._symmetric_memory as symm_mem
+
     HAS_TORCH_SYMMETRIC = True
 except ImportError:
     HAS_TORCH_SYMMETRIC = False
