@@ -66,7 +66,6 @@ from ..tensor.float8_tensor import (
 )
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
-from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
 from ._common import apply_normalization, _fix_gathered_fp8_transpose, WeightGradStore
 from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ..tensor.quantized_tensor import (
