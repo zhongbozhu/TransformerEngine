@@ -49,6 +49,7 @@ from ..distributed import (
     in_fp8_activation_recompute_phase,
     _fsdp_scatter_tensors,
     _fsdp_gather_tensors,
+    _post_process_fp8_blockwise_gather,
 )
 from ..constants import GemmParallelModes, dist_group_type
 from ..jit import no_torch_dynamo
@@ -714,6 +715,10 @@ class _LayerNormLinear(torch.autograd.Function):
                 if ln_out_total_work is not None:
                     ln_out_total_work.wait()
                     ln_out_total_work = None
+                    if isinstance(ln_out_total, Float8BlockwiseQTensorBase):
+                        ln_out_total = _post_process_fp8_blockwise_gather(
+                            ln_out_total, ctx.input_quantizer, None
+                        )
 
                 # Make sure GEMM inputs have required data
                 if isinstance(ln_out_total, QuantizedTensor):

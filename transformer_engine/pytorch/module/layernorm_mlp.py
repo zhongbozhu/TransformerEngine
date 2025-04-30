@@ -55,6 +55,7 @@ from ..distributed import (
     use_reentrant_activation_recompute,
     in_fp8_activation_recompute_phase,
     _fsdp_scatter_tensors,
+    _post_process_fp8_blockwise_gather,
 )
 from ..constants import dist_group_type
 from ..jit import no_torch_dynamo
@@ -66,6 +67,7 @@ from ..tensor.float8_tensor import (
 )
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
+from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
 from ._common import apply_normalization, _fix_gathered_fp8_transpose, WeightGradStore
 from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ..tensor.quantized_tensor import (
@@ -999,6 +1001,10 @@ class _LayerNormMLP(torch.autograd.Function):
                 if ln_out_total_work is not None:
                     ln_out_total_work.wait()
                     ln_out_total_work = None
+                    if isinstance(ln_out_total, Float8BlockwiseQTensorBase):
+                        ln_out_total = _post_process_fp8_blockwise_gather(
+                            ln_out_total, ctx.fc1_input_quantizer, None
+                        )
 
                 # Make sure GEMM inputs have required data
                 if isinstance(ln_out_total, QuantizedTensor):

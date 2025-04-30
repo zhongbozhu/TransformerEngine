@@ -48,6 +48,7 @@ from ..distributed import (
     in_fp8_activation_recompute_phase,
     _fsdp_scatter_tensors,
     _fsdp_gather_tensors,
+    _post_process_fp8_blockwise_gather,
 )
 from ..cpp_extensions import (
     general_gemm,
@@ -640,6 +641,10 @@ class _Linear(torch.autograd.Function):
                 if inputmat_total_work is not None:
                     inputmat_total_work.wait()
                     inputmat_total_work = None
+                    if isinstance(inputmat_total, Float8BlockwiseQTensorBase):
+                        inputmat_total = _post_process_fp8_blockwise_gather(
+                            inputmat_total, ctx.input_quantizer, None
+                        )
 
                 # Make sure GEMM inputs have required data
                 if isinstance(inputmat_total, QuantizedTensor):
