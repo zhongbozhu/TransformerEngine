@@ -129,14 +129,16 @@ class _GroupedLinear(torch.autograd.Function):
             if hasattr(recipe, "fp8_gemm_fprop"):
                 fprop_gemm_use_split_accumulator = recipe.fp8_gemm_fprop.use_split_accumulator
 
-            output_list = (
-                tex.fused_bulk_alloc_outputs(inp_view, m_splits, input_quantizers)
-                if isinstance(input_quantizers[0], Float8BlockQuantizer)
-                else None
-            )
-            inputmats = tex.fused_multi_quantize(
-                inputmats_no_fp8, output_list, input_quantizers, TE_DType[activation_dtype]
-            )
+            with torch.cuda.nvtx.range("_GroupedLinear_forward.fused_bulk_alloc_outputs"):
+                output_list = (
+                    tex.fused_bulk_alloc_outputs(inp_view, m_splits, input_quantizers)
+                    if recipe.float8_block_scaling()
+                    else None
+                )
+            with torch.cuda.nvtx.range("_GroupedLinear_forward.fused_multi_quantize"):
+                inputmats = tex.fused_multi_quantize(
+                    inputmats_no_fp8, output_list, input_quantizers, TE_DType[activation_dtype]
+                )
 
             weights_fp8 = []
             bias_dtype = torch.bfloat16 if activation_dtype == torch.float32 else activation_dtype
@@ -283,7 +285,7 @@ class _GroupedLinear(torch.autograd.Function):
                         tex.fused_bulk_alloc_outputs(
                             grad_output_view, ctx.m_splits, ctx.grad_output_quantizers
                         )
-                        if isinstance(ctx.grad_output_quantizers[0], Float8BlockQuantizer)
+                        if ctx.fp8_recipe.float8_block_scaling()
                         else None
                     )
                     grad_output = tex.fused_multi_quantize(

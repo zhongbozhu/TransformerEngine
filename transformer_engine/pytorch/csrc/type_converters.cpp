@@ -11,6 +11,8 @@
 #include "common.h"
 #include "pybind.h"
 
+#include <nvtx3/nvToolsExt.h>
+
 namespace transformer_engine::pytorch {
 namespace detail {
 
@@ -85,6 +87,7 @@ TensorWrapper NVTETensorFromMXFP8Tensor(py::handle tensor, Quantizer *quantizer)
 }
 
 TensorWrapper NVTETensorFromFloat8BlockwiseQTensor(py::handle tensor, Quantizer *quantizer) {
+  nvtxRangePush("FP8Block_TensorWrapper");
   const DType dtype = tensor.attr("_fp8_dtype").cast<DType>();
   bool is_2D_scaled = tensor.attr("_is_2D_scaled").cast<bool>();
 
@@ -113,6 +116,7 @@ TensorWrapper NVTETensorFromFloat8BlockwiseQTensor(py::handle tensor, Quantizer 
     ret.set_columnwise_scale_inv(scale_inv_colwise_dptr, DType::kFloat32, scale_inv_colwise_shape);
   }
   quantizer->set_quantization_params(&ret);
+  nvtxRangePop();
   return ret;
 }
 

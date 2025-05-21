@@ -11,6 +11,8 @@
 #include "extensions.h"
 #include "pybind.h"
 
+#include <nvtx3/nvToolsExt.h>
+
 namespace transformer_engine::pytorch {
 
 std::vector<py::object> fused_bulk_alloc_outputs(at::Tensor input_view, std::vector<int> m_splits,
@@ -115,6 +117,7 @@ std::vector<py::object> fused_bulk_alloc_outputs(at::Tensor input_view, std::vec
       uint8_t* rowwise_scale_ptr =
           rowwise_full_tensor.data_ptr<uint8_t>() + total_size_rowwise_data;
       // use from_blob to construct rowwise_data_list and rowwise_scale_list
+      nvtxRangePush("te_bulk_alloc_from_blob_rowwise");
       for (int i = 0; i < num_splits; i++) {
         if (rowwise_data_sizes[i] == 0) {
           NVTE_CHECK(rowwise_scale_sizes[i] == 0,
@@ -143,6 +146,7 @@ std::vector<py::object> fused_bulk_alloc_outputs(at::Tensor input_view, std::vec
           rowwise_scale_ptr += rowwise_scale_sizes[i];
         }
       }
+      nvtxRangePop();
     }
 
     if (columnwise_usage) {
@@ -152,6 +156,7 @@ std::vector<py::object> fused_bulk_alloc_outputs(at::Tensor input_view, std::vec
       uint8_t* columnwise_data_ptr = columnwise_full_tensor.data_ptr<uint8_t>();
       uint8_t* columnwise_scale_ptr =
           columnwise_full_tensor.data_ptr<uint8_t>() + total_size_columnwise_data;
+      nvtxRangePush("te_bulk_alloc_from_blob_columnwise");
       for (int i = 0; i < num_splits; i++) {
         if (columnwise_data_sizes[i] == 0) {
           NVTE_CHECK(columnwise_scale_sizes[i] == 0,
@@ -181,9 +186,11 @@ std::vector<py::object> fused_bulk_alloc_outputs(at::Tensor input_view, std::vec
           columnwise_scale_ptr += columnwise_scale_sizes[i];
         }
       }
+      nvtxRangePop();
     }
 
     for (int i = 0; i < num_splits; i++) {
+      nvtxRangePush(std::string("te_bulk_alloc_build_py_object" + std::to_string(i)).c_str());
       py::handle Float8BlockwiseQTensorClass(
           reinterpret_cast<PyObject*>(Float8BlockwiseQTensorBasePythonClass));
 
@@ -202,6 +209,7 @@ std::vector<py::object> fused_bulk_alloc_outputs(at::Tensor input_view, std::vec
           "is_2D_scaled"_a = is_2D_scaled);
 
       output_list.emplace_back(std::move(ret));
+      nvtxRangePop();
     }
 
   } else {
@@ -215,6 +223,8 @@ std::vector<py::object> fused_multi_quantize(std::vector<at::Tensor> input_list,
                                              std::optional<std::vector<py::object>> output_list,
                                              std::vector<py::handle> quantizer_list, DType otype) {
   init_extension();
+
+  nvtxRangePush("prep_fused_multi_quantize");
   std::vector<NVTETensor> nvte_tensor_input_list;
   std::vector<NVTETensor> nvte_tensor_output_list;
   std::vector<py::object> py_output_objects_list;
@@ -229,6 +239,7 @@ std::vector<py::object> fused_multi_quantize(std::vector<at::Tensor> input_list,
 
   // create TE tensors from input
   for (size_t i = 0; i < input_list.size(); i++) {
+    nvtxRangePush(std::string("make_te_tensor" + std::to_string(i)).c_str());
     auto input_tensor = makeTransformerEngineTensor(input_list[i]);
     const NVTEShape input_shape = input_tensor.shape();
 
@@ -244,14 +255,22 @@ std::vector<py::object> fused_multi_quantize(std::vector<at::Tensor> input_list,
       std::tie(output_tensor, o) = quantizer->create_tensor(output_shape, otype);
       py_output_objects_list.push_back(o);
     } else {
+      nvtxRangePush(std::string("makeTransformerEngineTensor" + std::to_string(i)).c_str());
       output_tensor = makeTransformerEngineTensor((*output_list)[i], quantizer_list[i]);
+      nvtxRangePop();
     }
     if (input_tensor.numel() == 0) continue;
+
+    nvtxRangePush(std::string("add_to_list" + std::to_string(i)).c_str());
 
     nvte_tensor_output_list.emplace_back(output_tensor.data());
     nvte_tensor_input_list.emplace_back(input_tensor.data());
     tensor_wrappers.emplace_back(std::move(input_tensor));
     tensor_wrappers.emplace_back(std::move(output_tensor));
+
+    nvtxRangePop();
+
+    nvtxRangePop();
   }
 
   // Check tensor lists
@@ -264,6 +283,8 @@ std::vector<py::object> fused_multi_quantize(std::vector<at::Tensor> input_list,
       break;
     }
   }
+
+  nvtxRangePop();
 
   // Launch TE kernel
   if (with_fused_kernel) {

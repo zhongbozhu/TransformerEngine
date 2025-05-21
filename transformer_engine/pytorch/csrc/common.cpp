@@ -10,6 +10,8 @@
 #include "pybind.h"
 #include "transformer_engine/transformer_engine.h"
 
+#include <nvtx3/nvToolsExt.h>
+
 namespace transformer_engine::pytorch {
 
 std::vector<size_t> getTensorShape(at::Tensor t) {
@@ -46,7 +48,9 @@ transformer_engine::DType getTransformerEngineFP8Type(bool e4m3_if_hybrid,
 
 TensorWrapper makeTransformerEngineTensor(py::handle tensor, py::handle quantizer) {
   NVTE_CHECK(!tensor.is_none(), "Tensor is not allocated!");
+  nvtxRangePush("TE_convert_quantizer");
   std::unique_ptr<Quantizer> my_quantizer = convert_quantizer(quantizer);
+  nvtxRangePop();
   // check for both quantizer & tensor type:
   // mxfp8 tensor -> mxfp8 quantizer
   // float8 tensor -> delayed scaling quantizer OR current scaling quantizer
@@ -57,7 +61,9 @@ TensorWrapper makeTransformerEngineTensor(py::handle tensor, py::handle quantize
       if (!(quantizer.is_none() || check_quantizer_type(quantizer.ptr()))) {
         continue;
       }
+      nvtxRangePush("TE_create_tensor");
       auto x = create_tensor(tensor, my_quantizer.get());
+      nvtxRangePop();
       return x;
     }
   }

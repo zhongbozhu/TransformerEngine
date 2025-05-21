@@ -192,10 +192,8 @@ if __name__ == "__main__":
     use_bias = False
     # Set the MKN values to benchmark
     mkns = []
-    for m in [1024]:
-        # for m in [4096, 8192, 16384]:
-        # for n in [1024, 2048, 4096, 8192, 16384]:
-        for n in [3072]:
+    for m in [4096, 6144]:
+        for n in [4096, 7168]:
             for k in [4096]:
                 mkns.append((m, k, n))
 
@@ -205,9 +203,8 @@ if __name__ == "__main__":
     recipe_list = [
         "fp8_sub_channel",
     ]
-
-    # num_gemms_list = [16, 32]
-    num_gemms_list = [4]
+    
+    num_gemms_list = [8]
 
     if args.profile:
         # nsys profile --output=./benchmarks/linear/mkn_4096_4096_4096_numgemm_1_bf16 --trace=cuda,nvtx,cudnn,cublas python benchmarks/linear/benchmark_grouped_linear.py --profile
