@@ -123,17 +123,29 @@ class _GroupedLinear(torch.autograd.Function):
             for output_quantizer in output_quantizers:
                 output_quantizer.set_usage(rowwise=True, columnwise=False)
 
+        inp_full_rowwise_tensor = None
+        inp_full_columnwise_tensor = None
+
         fprop_gemm_use_split_accumulator = _2X_ACC_FPROP
         if fp8:
             recipe = FP8GlobalStateManager.get_fp8_recipe()
             if hasattr(recipe, "fp8_gemm_fprop"):
                 fprop_gemm_use_split_accumulator = recipe.fp8_gemm_fprop.use_split_accumulator
 
-            output_list = (
-                tex.fused_bulk_alloc_outputs(inp_view, m_splits, input_quantizers)
-                if isinstance(input_quantizers[0], Float8BlockQuantizer)
-                else None
-            )
+            # output_list = (
+            #     tex.fused_bulk_alloc_outputs(inp_view, m_splits, input_quantizers)
+            #     if isinstance(input_quantizers[0], Float8BlockQuantizer)
+            #     else None
+            # )
+            output_list = None
+            if output_list is not None:
+                inp_full_rowwise_tensor = output_list[-2]
+                inp_full_columnwise_tensor = output_list[-1]
+                # get rid of the last two elements of output_list
+                output_list = output_list[:-2]
+                # print(f"inp_full_rowwise_tensor.shape: {inp_full_rowwise_tensor.shape}")
+                # print(f"inp_full_columnwise_tensor.shape: {inp_full_columnwise_tensor.shape}")
+                # print(f"output_list: {output_list}")
             inputmats = tex.fused_multi_quantize(
                 inputmats_no_fp8, output_list, input_quantizers, TE_DType[activation_dtype]
             )
@@ -195,6 +207,8 @@ class _GroupedLinear(torch.autograd.Function):
                 for inputmat in inputmats:
                     if isinstance(inputmat, QuantizedTensorBase):
                         inputmat.update_usage(rowwise_usage=False, columnwise_usage=True)
+                        del inp_full_rowwise_tensor
+                        inp_full_rowwise_tensor = None
             if inp.requires_grad:
                 for weight in weights_fp8:
                     if isinstance(weight, QuantizedTensorBase):
@@ -205,6 +219,7 @@ class _GroupedLinear(torch.autograd.Function):
                 *weights_fp8,
                 *weights,
                 *biases,
+                inp_full_columnwise_tensor,
             )
             ctx.save_for_backward(*tensors_to_save)
             ctx.tensor_objects = tensor_objects
@@ -265,6 +280,9 @@ class _GroupedLinear(torch.autograd.Function):
             grad_output = [None] * ctx.num_gemms
             grad_biases = [None] * ctx.num_gemms
 
+            grad_output_full_rowwise_tensor = None
+            grad_output_full_columnwise_tensor = None
+
             if ctx.fp8:
                 if ctx.use_bias:
                     # unfuse bgrad for now until cast_transpose + dgrad calculation is ready
@@ -279,13 +297,22 @@ class _GroupedLinear(torch.autograd.Function):
                                 grad_output_mats[i], ctx.grad_output_quantizers[i]
                             )
                 else:
-                    output_list = (
-                        tex.fused_bulk_alloc_outputs(
-                            grad_output_view, ctx.m_splits, ctx.grad_output_quantizers
-                        )
-                        if isinstance(ctx.grad_output_quantizers[0], Float8BlockQuantizer)
-                        else None
-                    )
+                    # output_list = (
+                    #     tex.fused_bulk_alloc_outputs(
+                    #         grad_output_view, ctx.m_splits, ctx.grad_output_quantizers
+                    #     )
+                    #     if isinstance(ctx.grad_output_quantizers[0], Float8BlockQuantizer)
+                    #     else None
+                    # )
+                    output_list = None
+                    if output_list is not None:
+                        grad_output_full_rowwise_tensor = output_list[-2]
+                        grad_output_full_columnwise_tensor = output_list[-1]
+                        # get rid of the last two elements of output_list
+                        output_list = output_list[:-2]
+                        # print(f"grad_output_full_rowwise_tensor.shape: {grad_output_full_rowwise_tensor.shape}")
+                        # print(f"grad_output_full_columnwise_tensor.shape: {grad_output_full_columnwise_tensor.shape}")
+                        # print(f"output_list: {output_list}")
                     grad_output = tex.fused_multi_quantize(
                         grad_output_mats,
                         output_list,

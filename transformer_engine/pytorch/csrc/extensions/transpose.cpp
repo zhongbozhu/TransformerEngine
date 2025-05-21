@@ -109,7 +109,7 @@ std::vector<py::object> fused_bulk_alloc_outputs(at::Tensor input_view, std::vec
     if (rowwise_usage) {
       rowwise_full_tensor =
           at::empty({(int64_t)total_size_rowwise}, at::device(at::kCUDA).dtype(torch::kUInt8));
-      rowwise_full_tensor_holder = std::make_shared<at::Tensor>(rowwise_full_tensor);
+      // rowwise_full_tensor_holder = std::make_shared<at::Tensor>(rowwise_full_tensor);
       // use raw pointer math + from blob, avoid torch slice to reduce cpu overhead
       uint8_t* rowwise_data_ptr = rowwise_full_tensor.data_ptr<uint8_t>();
       uint8_t* rowwise_scale_ptr =
@@ -128,16 +128,26 @@ std::vector<py::object> fused_bulk_alloc_outputs(at::Tensor input_view, std::vec
                          static_cast<int64_t>(rowwise_scale_shapes[i].second)},
                         at::device(at::kCUDA).dtype(torch::kFloat32)));
         } else {
+          // rowwise_data_list.emplace_back(at::from_blob(
+          //     rowwise_data_ptr,
+          //     {static_cast<int64_t>(rowwise_data_shapes[i].first),
+          //      static_cast<int64_t>(rowwise_data_shapes[i].second)},
+          //     [rowwise_full_tensor_holder](void*) {}, at::device(at::kCUDA).dtype(torch::kUInt8)));
+          // rowwise_scale_list.emplace_back(at::from_blob(
+          //     rowwise_scale_ptr,
+          //     {static_cast<int64_t>(rowwise_scale_shapes[i].first),
+          //      static_cast<int64_t>(rowwise_scale_shapes[i].second)},
+          //     [rowwise_full_tensor_holder](void*) {},
+          //     at::device(at::kCUDA).dtype(torch::kFloat32)));
           rowwise_data_list.emplace_back(at::from_blob(
               rowwise_data_ptr,
               {static_cast<int64_t>(rowwise_data_shapes[i].first),
                static_cast<int64_t>(rowwise_data_shapes[i].second)},
-              [rowwise_full_tensor_holder](void*) {}, at::device(at::kCUDA).dtype(torch::kUInt8)));
+              at::device(at::kCUDA).dtype(torch::kUInt8)));
           rowwise_scale_list.emplace_back(at::from_blob(
               rowwise_scale_ptr,
               {static_cast<int64_t>(rowwise_scale_shapes[i].first),
                static_cast<int64_t>(rowwise_scale_shapes[i].second)},
-              [rowwise_full_tensor_holder](void*) {},
               at::device(at::kCUDA).dtype(torch::kFloat32)));
           rowwise_data_ptr += rowwise_data_sizes[i];
           rowwise_scale_ptr += rowwise_scale_sizes[i];
@@ -148,7 +158,7 @@ std::vector<py::object> fused_bulk_alloc_outputs(at::Tensor input_view, std::vec
     if (columnwise_usage) {
       columnwise_full_tensor =
           at::empty({(int64_t)total_size_columnwise}, at::device(at::kCUDA).dtype(torch::kUInt8));
-      columnwise_full_tensor_holder = std::make_shared<at::Tensor>(columnwise_full_tensor);
+      // columnwise_full_tensor_holder = std::make_shared<at::Tensor>(columnwise_full_tensor);
       uint8_t* columnwise_data_ptr = columnwise_full_tensor.data_ptr<uint8_t>();
       uint8_t* columnwise_scale_ptr =
           columnwise_full_tensor.data_ptr<uint8_t>() + total_size_columnwise_data;
@@ -165,17 +175,27 @@ std::vector<py::object> fused_bulk_alloc_outputs(at::Tensor input_view, std::vec
                          static_cast<int64_t>(columnwise_scale_shapes[i].second)},
                         at::device(at::kCUDA).dtype(torch::kFloat32)));
         } else {
+          // columnwise_data_list.emplace_back(at::from_blob(
+          //     columnwise_data_ptr,
+          //     {static_cast<int64_t>(columnwise_data_shapes[i].first),
+          //      static_cast<int64_t>(columnwise_data_shapes[i].second)},
+          //     [columnwise_full_tensor_holder](void*) {},
+          //     at::device(at::kCUDA).dtype(torch::kUInt8)));
+          // columnwise_scale_list.emplace_back(at::from_blob(
+          //     columnwise_scale_ptr,
+          //     {static_cast<int64_t>(columnwise_scale_shapes[i].first),
+          //      static_cast<int64_t>(columnwise_scale_shapes[i].second)},
+          //     [columnwise_full_tensor_holder](void*) {},
+          //     at::device(at::kCUDA).dtype(torch::kFloat32)));
           columnwise_data_list.emplace_back(at::from_blob(
               columnwise_data_ptr,
               {static_cast<int64_t>(columnwise_data_shapes[i].first),
                static_cast<int64_t>(columnwise_data_shapes[i].second)},
-              [columnwise_full_tensor_holder](void*) {},
               at::device(at::kCUDA).dtype(torch::kUInt8)));
           columnwise_scale_list.emplace_back(at::from_blob(
               columnwise_scale_ptr,
               {static_cast<int64_t>(columnwise_scale_shapes[i].first),
                static_cast<int64_t>(columnwise_scale_shapes[i].second)},
-              [columnwise_full_tensor_holder](void*) {},
               at::device(at::kCUDA).dtype(torch::kFloat32)));
           columnwise_data_ptr += columnwise_data_sizes[i];
           columnwise_scale_ptr += columnwise_scale_sizes[i];
@@ -204,6 +224,17 @@ std::vector<py::object> fused_bulk_alloc_outputs(at::Tensor input_view, std::vec
       output_list.emplace_back(std::move(ret));
     }
 
+    // also return full tensor if we want manual control of the GC process
+    if (rowwise_usage) {
+      output_list.emplace_back(py::cast(rowwise_full_tensor));
+    } else {
+      output_list.emplace_back(py::none());
+    }
+    if (columnwise_usage) {
+      output_list.emplace_back(py::cast(columnwise_full_tensor));
+    } else {
+      output_list.emplace_back(py::none());
+    }
   } else {
     NVTE_ERROR("Fused bulk alloc is not supported for this quantizer type");
   }
