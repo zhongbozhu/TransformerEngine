@@ -7,6 +7,7 @@ import torch
 import torch.utils.benchmark as benchmark
 import pandas as pd
 import pathlib
+import random
 
 from transformer_engine.pytorch.module import GroupedLinear
 from transformer_engine.common.recipe import Float8BlockScaling
@@ -18,6 +19,18 @@ RECIPES = {
     "fp8_sub_channel": Float8BlockScaling(),
 }
 
+def generate_list_with_fixed_sum(n, target_sum):
+    """
+    Generates a list of `n` non-negative integers that sum up to `target_sum`.
+    """
+    if n <= 0 or target_sum < 0:
+        raise ValueError("n must be > 0 and target_sum must be >= 0")
+    # Choose n-1 random split points in the range [0, target_sum]
+    split_points = sorted(random.sample(range(1, target_sum), n - 1))
+    split_points = [0] + split_points + [target_sum]
+    result = [split_points[i+1] - split_points[i] for i in range(n)]
+    return result
+
 
 def run_linear_multiple_steps(layer, x, m_splits, mode, gradient, run_num_steps=1, recipe=None):
     assert mode in ["fwd_only", "fwd_bwd"]
@@ -25,6 +38,9 @@ def run_linear_multiple_steps(layer, x, m_splits, mode, gradient, run_num_steps=
         fp8_autocast(enabled=True, fp8_recipe=recipe) if recipe is not None else nullcontext()
     )
     # print(f"fp8_context: {fp8_context} and is it nullcontext? {isinstance(fp8_context, nullcontext)}")
+
+    # override m_splits
+    m_splits = generate_list_with_fixed_sum(len(m_splits), sum(m_splits))
 
     if mode == "fwd_only":
         with torch.no_grad(), fp8_context:
@@ -215,8 +231,8 @@ if __name__ == "__main__":
         # nsys profile --output=./benchmarks/linear/mkn_4096_4096_4096_numgemm_8_fp8_sub_channel --trace=cuda,nvtx,cudnn,cublas python benchmarks/linear/benchmark_grouped_linear.py --profile
         # nsys profile --output=./benchmarks/linear/mkn_8192_8192_8192_numgemm_2_fp8_sub_channel --trace=cuda,nvtx,cudnn,cublas python benchmarks/linear/benchmark_grouped_linear.py --profile
         mkns = [(4096, 4096, 4096)]
-        recipe_list = ["fp8_sub_channel"]
-        # recipe_list = ["bf16"]
+        # recipe_list = ["fp8_sub_channel"]
+        recipe_list = ["bf16"]
         num_gemms_list = [8]
         torch.autograd.profiler.emit_nvtx(record_shapes=True).__enter__()
 
