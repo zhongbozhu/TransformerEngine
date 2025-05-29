@@ -140,12 +140,15 @@ def general_grouped_gemm(
 
     # Use bfloat16 as default bias_dtype
     gelu_input = empty_tensors
-    out_dtype = TE_DType[out[0].dtype] if D_dtype is None else D_dtype
+
+    assert out is not None, "out: List[torch.Tensor] must be provided to general_grouped_gemm."
+    out_dtype_torch = out[0].dtype if len(out) > 0 else out_dtype
+    out_dtype = TE_DType[out_dtype_torch] if D_dtype is None else D_dtype
 
     sm_count = get_sm_count()
     if grad and use_bias:
         grad_bias = [
-            torch.empty(B[i].shape[1], dtype=out[0].dtype, device="cuda") for i in range(num_gemms)
+            torch.empty(B[i].shape[1], dtype=out_dtype_torch, device="cuda") for i in range(num_gemms)
         ]
     else:
         grad_bias = empty_tensors
@@ -156,6 +159,8 @@ def general_grouped_gemm(
         bias_dtype = TE_DType[torch.bfloat16]
 
     if gelu:
+        if len(out) == 0:
+            raise ValueError("GELU requires at least one output tensor in python side.")
         gelu_input = [
             torch.empty_like(o, dtype=bias_dtype, memory_format=torch.contiguous_format)
             for o in out

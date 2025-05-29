@@ -18,6 +18,8 @@
 #include "transformer_engine/transformer_engine.h"
 #include "util.h"
 
+#include <nvtx3/nvToolsExt.h>
+
 namespace {
 
 void* get_data_ptr(transformer_engine::pytorch::MaybeTensor tensor) {
@@ -324,6 +326,7 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
     std::vector<at::Tensor> bias, DType bias_type, bool single_output,
     std::vector<at::Tensor> pre_gelu_out, bool grad, std::vector<at::Tensor> workspace,
     size_t workspaceSize, bool accumulate, bool use_split_accumulator, int math_sm_count) {
+  nvtxRangePush("prep_te_general_grouped_gemm");
   std::vector<NVTETensor> te_A_vector, te_B_vector, te_D_vector, te_bias_vector,
       te_pre_gelu_out_vector, te_workspace_vector;
   std::vector<TensorWrapper> wrappers;
@@ -345,8 +348,12 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
   }
 
   for (size_t i = 0; i < A.size(); i++) {
+    nvtxRangePush((std::string("convert_to_te_tensor") + std::to_string(i)).c_str());
     auto te_A = makeTransformerEngineTensor(A[i], none);
     auto te_B = makeTransformerEngineTensor(B[i], none);
+    nvtxRangePop();
+
+    nvtxRangePush((std::string("prep_output_tensor") + std::to_string(i)).c_str());
 
     // if there is single output
     at::Tensor out_tensor;
@@ -354,6 +361,7 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
         pytorch::detail::getGemmOutputShape(te_A.shape(), transa, te_B.shape(), transb);
     bool D_numel_is_zero = false;
     std::vector<int64_t> D_shape;
+    void* D_tensor_data_ptr = nullptr;
     for (size_t t : size_t_shape) {
       D_shape.push_back(t);
       if (t == 0) {
@@ -361,22 +369,26 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
       }
     }
     auto dtype = GetATenDType(D_type);
-    auto opts = torch::TensorOptions().dtype(dtype).device(torch::kCUDA);
+    // auto opts = torch::TensorOptions().dtype(dtype).device(torch::kCUDA);
     if (single_output) {
+      nvtxRangePush((std::string("slice_tensor") + std::to_string(i)).c_str());
       if (output_data_ptr == nullptr) {
-        out_tensor = at::empty(D_shape, opts);
+        // out_tensor = at::empty(D_shape, opts);
+        D_tensor_data_ptr = nullptr;
       } else {
         // We need to check !D_numel_is_zero because if the final input portion has zero elements,
         // output_data_ptr would point beyond the allocated memory of D. This would cause
         // at::from_blob to fail as it would reference memory not allocated by CUDA.
         if (!D_numel_is_zero) {
-          out_tensor = at::from_blob(output_data_ptr, D_shape, opts);
+          // out_tensor = at::from_blob(output_data_ptr, D_shape, opts);
+          D_tensor_data_ptr = reinterpret_cast<void*>(output_data_ptr);
         }
       }
       char* char_ptr = reinterpret_cast<char*>(output_data_ptr);
       char_ptr += D_shape[0] * D_shape[1] * (*D)[0].element_size();
       output_data_ptr = reinterpret_cast<void*>(char_ptr);
-      D_vectors.emplace_back(out_tensor);
+      // D_vectors.emplace_back(out_tensor);
+      nvtxRangePop();
     } else {
       if (D == std::nullopt) {
         auto opts = torch::TensorOptions().dtype(dtype).device(torch::kCUDA);
@@ -386,6 +398,9 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
         out_tensor = (*D)[i];
       }
     }
+    nvtxRangePop();
+
+    nvtxRangePush((std::string("prep_gemm_bias") + std::to_string(i)).c_str());
 
     if (te_A.numel() == 0 || te_B.numel() == 0) {
       if (out_tensor.numel() != 0 && !accumulate) out_tensor.zero_();
@@ -396,12 +411,33 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
       continue;
     }
 
+    nvtxRangePop();
+
+    nvtxRangePush((std::string("prep_gemm_scaling_factors") + std::to_string(i)).c_str());
+
     // Optionally swizzle the scaling factors
     swizzled_scale_inverses_list.emplace_back(std::move(swizzle_scaling_factors(te_A, transa)));
     swizzled_scale_inverses_list.emplace_back(std::move(swizzle_scaling_factors(te_B, !transb)));
 
-    auto te_D = makeTransformerEngineTensor(out_tensor);
+    nvtxRangePop();
+
+    nvtxRangePush((std::string("prep_gemm_output_in_te") + std::to_string(i)).c_str());
+
+    nvtxRangePush((std::string("makeTransformerEngineTensor_out_tensor") + std::to_string(i)).c_str());
+    // auto te_D = makeTransformerEngineTensor(out_tensor);
+    transformer_engine::TensorWrapper te_D;
+    if (single_output) {
+      te_D = makeTransformerEngineTensor(D_tensor_data_ptr, size_t_shape, D_type);
+    } else {
+      te_D = makeTransformerEngineTensor(out_tensor);
+    }
+    nvtxRangePop();
+
+    nvtxRangePush((std::string("makeTransformerEngineTensor_bias") + std::to_string(i)).c_str());
     auto te_bias = makeTransformerEngineTensor(bias[i]);
+    nvtxRangePop();
+
+    nvtxRangePush((std::string("makeTransformerEngineTensor_gelu_out") + std::to_string(i)).c_str());
     auto te_pre_gelu_out = makeTransformerEngineTensor(pre_gelu_out[i]);
 
     const auto gelu_shape = pre_gelu_out[i].data_ptr() == nullptr
@@ -412,6 +448,9 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
     DType gelu_type = bias_type;
     te_pre_gelu_out =
         makeTransformerEngineTensor(get_data_ptr(pre_gelu_out[i]), gelu_shape, gelu_type);
+    nvtxRangePop();
+
+    nvtxRangePop();
 
     te_A_vector.emplace_back(te_A.data());
     te_B_vector.emplace_back(te_B.data());
@@ -432,6 +471,9 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
     wrappers.emplace_back(std::move(wsp));
   }
   // For now, we only have multi-stream cublas backend.
+  nvtxRangePop();
+
+  nvtxRangePush("actual_nvte_multi_stream_cublas_gemm");
   NVTE_SCOPED_GIL_RELEASE({
     nvte_multi_stream_cublas_gemm(te_A_vector.data(), te_B_vector.data(), te_D_vector.data(),
                                   te_bias_vector.data(), te_pre_gelu_out_vector.data(),
@@ -439,6 +481,7 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
                                   te_workspace_vector.data(), accumulate, use_split_accumulator,
                                   math_sm_count, at::cuda::getCurrentCUDAStream());
   });
+  nvtxRangePop();
   return bias;
 }
 

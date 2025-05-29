@@ -10,6 +10,8 @@
 #include "pybind.h"
 #include "transformer_engine/transformer_engine.h"
 
+#include <nvtx3/nvToolsExt.h>
+
 namespace transformer_engine::pytorch {
 
 std::vector<size_t> getTensorShape(at::Tensor t) {
@@ -90,11 +92,13 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(
 }
 
 transformer_engine::TensorWrapper makeTransformerEngineTensor(at::Tensor tensor) {
+  nvtxRangePush("extract_meta_data");
   transformer_engine::DType dtype = GetTransformerEngineDType(tensor.scalar_type());
   std::vector<size_t> shape;
   for (auto s : tensor.sizes()) {
     shape.push_back(s);
   }
+  nvtxRangePop();
   return makeTransformerEngineTensor(tensor.data_ptr(), shape, dtype);
 }
 

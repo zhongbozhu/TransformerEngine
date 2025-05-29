@@ -11,6 +11,8 @@
 #include "common.h"
 #include "pybind.h"
 
+#include <nvtx3/nvToolsExt.h>
+
 namespace transformer_engine::pytorch {
 namespace detail {
 
@@ -85,14 +87,21 @@ TensorWrapper NVTETensorFromMXFP8Tensor(py::handle tensor, Quantizer *quantizer)
 }
 
 TensorWrapper NVTETensorFromFloat8BlockwiseQTensor(py::handle tensor, Quantizer *quantizer) {
+  nvtxRangePush("NVTETensorFromFloat8BlockwiseQTensor");
+
+  nvtxRangePush("extract_args");
   const DType dtype = tensor.attr("_fp8_dtype").cast<DType>();
   bool is_2D_scaled = tensor.attr("_is_2D_scaled").cast<bool>();
 
   bool rowwise_usage = !(tensor.attr("_rowwise_data").is_none());
   bool columnwise_usage = !(tensor.attr("_columnwise_data").is_none());
+  nvtxRangePop();
 
+  nvtxRangePush("build_wrapper");
   auto ret = TensorWrapper(is_2D_scaled ? NVTE_BLOCK_SCALING_2D : NVTE_BLOCK_SCALING_1D);
+  nvtxRangePop();
 
+  nvtxRangePush("set_rowwise_data");
   if (rowwise_usage) {
     const at::Tensor &data_rowwise = tensor.attr("_rowwise_data").cast<at::Tensor>();
     const at::Tensor &scale_inv_rowwise = tensor.attr("_rowwise_scale_inv").cast<at::Tensor>();
@@ -102,6 +111,9 @@ TensorWrapper NVTETensorFromFloat8BlockwiseQTensor(py::handle tensor, Quantizer 
     const auto scale_inv_rowwise_shape = getTensorShape(scale_inv_rowwise);
     ret.set_rowwise_scale_inv(scale_inv_rowwise_dptr, DType::kFloat32, scale_inv_rowwise_shape);
   }
+  nvtxRangePop();
+
+  nvtxRangePush("set_columnwise_data");
   if (columnwise_usage) {
     const at::Tensor &data_colwise = tensor.attr("_columnwise_data").cast<at::Tensor>();
     const at::Tensor &scale_inv_colwise = tensor.attr("_columnwise_scale_inv").cast<at::Tensor>();
@@ -112,7 +124,12 @@ TensorWrapper NVTETensorFromFloat8BlockwiseQTensor(py::handle tensor, Quantizer 
     const auto scale_inv_colwise_shape = getTensorShape(scale_inv_colwise);
     ret.set_columnwise_scale_inv(scale_inv_colwise_dptr, DType::kFloat32, scale_inv_colwise_shape);
   }
+  nvtxRangePop();
+
+  nvtxRangePush("set_quantization_params");
   quantizer->set_quantization_params(&ret);
+  nvtxRangePop();
+  nvtxRangePop();
   return ret;
 }
 

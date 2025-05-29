@@ -140,19 +140,20 @@ class _GroupedLinear(torch.autograd.Function):
                 inputmats_no_fp8, inp_view, m_splits, input_quantizers, TE_DType[activation_dtype]
             )
 
-            weights_fp8 = []
-            bias_dtype = torch.bfloat16 if activation_dtype == torch.float32 else activation_dtype
-            # FP8 cast to workspace buffer
-            update_workspace = is_first_microbatch is None or is_first_microbatch
-            for i in range(num_gemms):
-                weight_fp8 = module.get_weight_workspace(
-                    tensor=weights[i],
-                    quantizer=weight_quantizers[i],
-                    cache_name=(None if is_first_microbatch is None else f"weight{i}"),
-                    update_workspace=update_workspace,
-                    skip_update_flag=skip_fp8_weight_update,
-                )
-                weights_fp8.append(weight_fp8)
+            with torch.cuda.nvtx.range("py_get_weight_workspace"):
+                weights_fp8 = []
+                bias_dtype = torch.bfloat16 if activation_dtype == torch.float32 else activation_dtype
+                # FP8 cast to workspace buffer
+                update_workspace = is_first_microbatch is None or is_first_microbatch
+                for i in range(num_gemms):
+                    weight_fp8 = module.get_weight_workspace(
+                        tensor=weights[i],
+                        quantizer=weight_quantizers[i],
+                        cache_name=(None if is_first_microbatch is None else f"weight{i}"),
+                        update_workspace=update_workspace,
+                        skip_update_flag=skip_fp8_weight_update,
+                    )
+                    weights_fp8.append(weight_fp8)
 
         else:
             inputmats = inputmats_no_fp8
@@ -161,24 +162,27 @@ class _GroupedLinear(torch.autograd.Function):
 
         biases = [cast_if_needed(bias, bias_dtype) for bias in biases] if use_bias else biases
 
-        out = torch.empty(
-            [sum(m_splits), weights_fp8[0].size(0)],
-            dtype=activation_dtype,
-            device=device,
-        )
+        with torch.cuda.nvtx.range("py_empty_out"):
+            out = torch.empty(
+                [sum(m_splits), weights_fp8[0].size(0)],
+                dtype=activation_dtype,
+                device=device,
+            )
+            gemm_out_list = [out]
 
-        _ = general_grouped_gemm(
-            weights_fp8,
-            inputmats,
-            [out],
-            activation_dtype,
-            get_multi_stream_cublas_workspace(),
-            single_output=True,
-            m_splits=m_splits,
-            bias=biases,
-            use_bias=use_bias,
-            use_split_accumulator=fprop_gemm_use_split_accumulator,
-        )
+        with torch.cuda.nvtx.range("py_general_grouped_gemm"):
+            _ = general_grouped_gemm(
+                weights_fp8,
+                inputmats,
+                gemm_out_list,
+                activation_dtype,
+                get_multi_stream_cublas_workspace(),
+                single_output=True,
+                m_splits=m_splits,
+                bias=biases,
+                use_bias=use_bias,
+                use_split_accumulator=fprop_gemm_use_split_accumulator,
+            )
 
         if fp8_calibration:
             for i in range(num_gemms):
