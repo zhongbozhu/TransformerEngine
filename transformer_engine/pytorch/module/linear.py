@@ -124,6 +124,8 @@ class _Linear(torch.autograd.Function):
         if ub_name is not None:
             nvtx_label = f"{nvtx_label}.{ub_name}"
 
+        nvtx_range_push(f"{nvtx_label}.prep")
+
         # Make sure input dimensions are compatible
         out_features, in_features = weight.shape
         assert inp.shape[-1] == in_features, "GEMM not possible"
@@ -150,6 +152,8 @@ class _Linear(torch.autograd.Function):
         elif ub_overlap_ag_fprop:
             ub_obj = get_ub(ub_name + "_fprop")
             ub_type = tex.CommOverlapType.AG
+
+        nvtx_range_pop(f"{nvtx_label}.prep")
 
         # ------------------------------------------------------
         # Prepare input tensor
@@ -1364,6 +1368,8 @@ class Linear(TransformerEngineBaseModule):
                                first microbatch (since it is the first gradient being
                                produced)
         """
+        nvtx_range_push(f"my_nvtx_check.LinearModule.forward_nodynamo")
+
         if is_in_onnx_export_mode():
             return self.onnx_forward(inp, fp8_output)
 
@@ -1383,12 +1389,17 @@ class Linear(TransformerEngineBaseModule):
             if get_ub(self.ub_name + "_dgrad").is_fp8_ubuf():
                 fp8_grad = True
 
+        nvtx_range_push(f"my_nvtx_check.LinearModule.forward_nodynamo.prepare_forward")
+
         with torch.cuda.device(
             getattr(self, list(self.named_parameters())[0][0]).device
         ), self.prepare_forward(
             inp,
             allow_non_contiguous=isinstance(inp, QuantizedTensor),
         ) as inp:
+
+            nvtx_range_push(f"my_nvtx_check.LinearModule.forward_nodynamo.launching_linear_fn")
+            nvtx_range_push(f"my_nvtx_check.LinearModule.forward_nodynamo.launching_linear_fn.prep")
 
             weight_tensor, bias_tensor = self._get_weight_and_bias_tensors()
 
@@ -1456,12 +1467,19 @@ class Linear(TransformerEngineBaseModule):
                 self.save_original_input,
                 debug,
             )
+            nvtx_range_pop(f"my_nvtx_check.LinearModule.forward_nodynamo.launching_linear_fn.prep")
             out = linear_fn(*args)
+
+            nvtx_range_pop(f"my_nvtx_check.LinearModule.forward_nodynamo.launching_linear_fn")
+
         if self.gemm_bias_unfused_add:
             out = out + cast_if_needed(bias_tensor, self.activation_dtype)
 
+        nvtx_range_pop(f"my_nvtx_check.LinearModule.forward_nodynamo.prepare_forward")
+
         if self.return_bias:
             return out, cast_if_needed(bias_tensor, self.activation_dtype)
+        nvtx_range_pop(f"my_nvtx_check.LinearModule.forward_nodynamo")
         return out
 
     def _get_quantizers(self, fp8_output, fp8_grad):

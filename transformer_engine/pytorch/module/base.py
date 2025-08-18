@@ -43,6 +43,7 @@ from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..tensor._internal.float8_tensor_base import Float8TensorBase
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from ..utils import is_non_tn_fp8_gemm_supported, torch_get_autocast_gpu_dtype
+from ..utils import nvtx_range_push, nvtx_range_pop
 from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
 from ...common.recipe import DelayedScaling, Recipe
 from ...debug.pytorch.debug_state import TEDebugState
@@ -1013,6 +1014,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         to setup the forward aggregated amax reduction for every module
         just in case. The autocast exit will pick up the most recent one.
         """
+        nvtx_range_push(f"my_nvtx_check.BaseModule.inside_prepare_forward")
         self.forwarded_at_least_once = True
         # Activation recomputation is used and this is the second forward phase.
         if self.fp8 and in_fp8_activation_recompute_phase():
@@ -1039,6 +1041,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             # Activation recomputation is used and this is the first forward phase.
             if self.fp8 and self.training and is_fp8_activation_recompute_enabled():
                 FP8GlobalStateManager.copy_forward_fp8_meta_tensors_for_recompute(self.fp8_meta)
+
+        nvtx_range_pop(f"my_nvtx_check.BaseModule.inside_prepare_forward")
 
         with torch.cuda.nvtx.range(self.__class__.__name__ + " forward"):
             if not allow_non_contiguous and not inp.is_contiguous():
