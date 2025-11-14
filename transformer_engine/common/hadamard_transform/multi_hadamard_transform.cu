@@ -16,6 +16,7 @@
 #include "common/common.h"
 #include "common/util/ptx.cuh"
 #include "common/utils.cuh"
+#include "common/util/cuda_runtime.h"
 #include "hadamard_transform_utils.cuh"
 
 namespace transformer_engine {
@@ -125,6 +126,11 @@ __device__ __forceinline__ void ReduceMax(const float pre_rht_amax, const float 
                                           float* output_pre_rht_amax_ptr,
                                           float* output_identity_amax_ptr,
                                           float* output_transpose_amax_ptr, const int warpid) {
+  // sanity check, do nothing if all the output pointers are nullptr
+  if (output_pre_rht_amax_ptr == nullptr && output_identity_amax_ptr == nullptr && output_transpose_amax_ptr == nullptr) {
+    return;
+  }
+
   // intra-warp reduction
   constexpr int kWarpSize = 32;
   int local_rank = threadIdx.x % 32;
@@ -229,19 +235,9 @@ __global__ void MultiHadamardAmaxTmaKernel(const __grid_constant__ CUtensorMap t
                                            uint64_t row_length) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 
-  float* output_pre_rht_amax_ptr;
-  float* output_identity_amax_ptr;
-  float* output_transpose_amax_ptr;
-
-  // calculate the global offset in Y direction to access the correct amax buffer
-  int global_offset_y = blockIdx.y * CHUNK_DIM_Y;
-  int tensor_id = 0;
-  while (args.split_sections_range[tensor_id + 1] <= global_offset_y) {
-    ++tensor_id;
-  }
-  output_pre_rht_amax_ptr = static_cast<float*>(args.output_pre_rht_amax_list[tensor_id]);
-  output_identity_amax_ptr = static_cast<float*>(args.output_identity_amax_list[tensor_id]);
-  output_transpose_amax_ptr = static_cast<float*>(args.output_transpose_amax_list[tensor_id]);
+  float* output_pre_rht_amax_ptr = nullptr;
+  float* output_identity_amax_ptr = nullptr;
+  float* output_transpose_amax_ptr = nullptr;
 
   static_assert(CHUNK_DIM_Y >= BUFF_DIM_Y && CHUNK_DIM_Y % BUFF_DIM_Y == 0);
   static_assert(CHUNK_DIM_X >= BUFF_DIM_X && CHUNK_DIM_X % BUFF_DIM_X == 0);
@@ -250,9 +246,6 @@ __global__ void MultiHadamardAmaxTmaKernel(const __grid_constant__ CUtensorMap t
   constexpr size_t STAGES_X = CHUNK_DIM_X / BUFF_DIM_X;
 
   constexpr int kNumWarps = (THREADS_PER_CHUNK * THREADS_PER_Y) / kThreadsPerWarp;
-
-  const int input_block_offset_Y = blockIdx.y * CHUNK_DIM_Y;
-  const int input_block_offset_X = blockIdx.x * CHUNK_DIM_X;
 
   extern __shared__ __align__(128) char dynamic_shmem[];
   uintptr_t base_shmem_ptr = reinterpret_cast<uintptr_t>(dynamic_shmem);
@@ -273,6 +266,8 @@ __global__ void MultiHadamardAmaxTmaKernel(const __grid_constant__ CUtensorMap t
 
   const bool is_master_thread = (threadIdx.x == 0 && threadIdx.y == 0);
 
+  const int warpid = (threadIdx.x + threadIdx.y * blockDim.x) / kThreadsPerWarp;
+
   // Initialize shared memory barrier with the number of threads participating in the barrier.
 #pragma nv_diag_suppress static_var_with_dynamic_init
   uint64_t* mbar = reinterpret_cast<uint64_t*>(dshmem);
@@ -284,13 +279,6 @@ __global__ void MultiHadamardAmaxTmaKernel(const __grid_constant__ CUtensorMap t
   dshmem += sizeof(float) * kNumWarps;
   float* max_staging_pre_rht = reinterpret_cast<float*>(dshmem);
   dshmem += sizeof(float) * kNumWarps;
-
-  initialize_barriers<STAGES_X * STAGES_Y, THREADS_PER_CHUNK * THREADS_PER_Y>(mbar,
-                                                                              is_master_thread);
-
-  copy_2d_to_shared(in_shs[0], reinterpret_cast<const void*>(&tensor_map_input),
-                    input_block_offset_X, input_block_offset_Y, shmem_buff_size, &mbar[0],
-                    is_master_thread);
 
   uint32_t had_frag_i[4];
   uint32_t had_frag_t[4];
@@ -304,78 +292,148 @@ __global__ void MultiHadamardAmaxTmaKernel(const __grid_constant__ CUtensorMap t
   uint32_t local_amax_reg = *reinterpret_cast<uint32_t*>(&local_amax);
   uint32_t local_amax_t_reg = *reinterpret_cast<uint32_t*>(&local_amax_t);
 
-  for (int stage_y = 0; stage_y < STAGES_Y; ++stage_y) {
-    for (int stage_x = 0; stage_x < STAGES_X; ++stage_x) {
-      int stage = STAGES_X * stage_y + stage_x;
+  int pre_tensor_id = -1;
+  bool reset_local_amax_reg = true;
 
-      const int next_stage = stage + 1;
-      const int next_stage_x = stage_x + 1 == STAGES_X ? 0 : stage_x + 1;
-      const int next_stage_y = stage_x + 1 == STAGES_X ? stage_y + 1 : stage_y;
+  // Persistent CTA loop over tiles
+  const uint64_t num_tiles_x = (row_length + CHUNK_DIM_X - 1) / CHUNK_DIM_X;
+  const uint64_t num_tiles_y = (num_rows + CHUNK_DIM_Y - 1) / CHUNK_DIM_Y;
+  const uint64_t total_tiles = num_tiles_x * num_tiles_y;
 
-      if (next_stage < STAGES_X * STAGES_Y) {
-        const int input_global_offset_Y = input_block_offset_Y + next_stage_y * BUFF_DIM_Y;
-        const int input_global_offset_X = input_block_offset_X + next_stage_x * BUFF_DIM_X;
+  int local_tile_processed = 0;
 
-        copy_2d_to_shared(in_shs[next_stage % 2],  // ping-pong
-                          reinterpret_cast<const void*>(&tensor_map_input), input_global_offset_X,
-                          input_global_offset_Y, shmem_buff_size, &mbar[next_stage],
-                          is_master_thread);
+  for (uint64_t tile_linear = blockIdx.x; tile_linear < total_tiles; tile_linear += gridDim.x) {
+    const uint64_t tile_y = tile_linear / num_tiles_x;
+    const uint64_t tile_x = tile_linear % num_tiles_x;
+
+    const int input_block_offset_Y = static_cast<int>(tile_y * CHUNK_DIM_Y);
+    const int input_block_offset_X = static_cast<int>(tile_x * CHUNK_DIM_X);
+
+    // get access the correct amax buffer by input_block_offset_Y
+    int tensor_id = 0;
+    while (args.split_sections_range[tensor_id + 1] <= input_block_offset_Y) {
+      ++tensor_id;
+    }
+
+    reset_local_amax_reg = (pre_tensor_id != tensor_id) && (local_tile_processed > 0);
+    if (reset_local_amax_reg) {
+
+      // moving to the next input split, local amax needs to be flushed to global amax buffer
+      if constexpr (kReturnPreRhtAmax) {
+        unpack_max_of_packed_bf16(local_pre_rht_amax_reg, local_pre_rht_amax);
       }
+      if constexpr (kReturnIdentityAmax) {
+        unpack_max_of_packed_bf16(local_amax_reg, local_amax);
+      }
+      if constexpr (kReturnTransposedAmax) {
+        unpack_max_of_packed_bf16(local_amax_t_reg, local_amax_t);
+      }
+    
+      ReduceMax<kNumWarps, kReturnPreRhtAmax, kReturnIdentityAmax, kReturnTransposedAmax>(
+          local_pre_rht_amax, local_amax, local_amax_t, max_staging_pre_rht, max_staging_identity,
+          max_staging_transpose, output_pre_rht_amax_ptr, output_identity_amax_ptr,
+          output_transpose_amax_ptr, warpid);
 
-      ptx::fence_proxy_async_shared_cta();
+      local_pre_rht_amax = 0.0;
+      local_amax = 0.0;
+      local_amax_t = 0.0;
+      local_pre_rht_amax_reg = *reinterpret_cast<uint32_t*>(&local_pre_rht_amax);
+      local_amax_reg = *reinterpret_cast<uint32_t*>(&local_amax);
+      local_amax_t_reg = *reinterpret_cast<uint32_t*>(&local_amax_t);
+    }
 
-      // Wait for the data to have arrived
-      ptx::mbarrier_wait_parity(&mbar[stage], 0);
+    pre_tensor_id = tensor_id;
 
-      const size_t compute_stage_x_num =
-          BUFF_DIM_X / (kHadamardDimension * (THREADS_PER_CHUNK / kThreadsPerWarp));
-      const size_t compute_stage_y_num = BUFF_DIM_Y / (kHadamardDimension * THREADS_PER_Y);
+    output_pre_rht_amax_ptr = static_cast<float*>(args.output_pre_rht_amax_list[tensor_id]);
+    output_identity_amax_ptr = static_cast<float*>(args.output_identity_amax_list[tensor_id]);
+    output_transpose_amax_ptr = static_cast<float*>(args.output_transpose_amax_list[tensor_id]);
 
-      const size_t in_row_stride = BUFF_DIM_X;
+    initialize_barriers<STAGES_X * STAGES_Y, THREADS_PER_CHUNK * THREADS_PER_Y>(mbar,
+                                                                                is_master_thread);
 
-      IType* in_sh_ptr = in_shs[stage % 2];
+    copy_2d_to_shared(in_shs[0], reinterpret_cast<const void*>(&tensor_map_input),
+                      input_block_offset_X, input_block_offset_Y, shmem_buff_size, &mbar[0],
+                      is_master_thread);
+    
+    for (int stage_y = 0; stage_y < STAGES_Y; ++stage_y) {
+      for (int stage_x = 0; stage_x < STAGES_X; ++stage_x) {
+        
+        int stage = STAGES_X * stage_y + stage_x;
 
-#pragma unroll
-      for (size_t compute_stage_y = 0; compute_stage_y < compute_stage_y_num; compute_stage_y++) {
-        const int row_idx_offset = (compute_stage_y * kHadamardDimension * THREADS_PER_Y +
-                                    threadIdx.y * kHadamardDimension);
-        const int in_row_offset = row_idx_offset * in_row_stride;
+        const int next_stage = stage + 1;
+        const int next_stage_x = stage_x + 1 == STAGES_X ? 0 : stage_x + 1;
+        const int next_stage_y = stage_x + 1 == STAGES_X ? stage_y + 1 : stage_y;
 
-#pragma unroll
-        for (size_t compute_stage_x = 0; compute_stage_x < compute_stage_x_num; compute_stage_x++) {
-          ComputeKernel<IType, kHadamardDimension, BUFF_DIM_Y, BUFF_DIM_X, kReturnPreRhtAmax,
-                        kReturnIdentityAmax, kReturnTransposedAmax>(
-              had_frag_i, had_frag_t,
-              in_sh_ptr + in_row_offset +
-                  (compute_stage_x * kHadamardDimension * (THREADS_PER_CHUNK / kThreadsPerWarp)),
-              local_pre_rht_amax_reg, local_amax_reg, local_amax_t_reg);
+
+        if (next_stage < STAGES_X * STAGES_Y) {
+          const int input_global_offset_Y = input_block_offset_Y + next_stage_y * BUFF_DIM_Y;
+          const int input_global_offset_X = input_block_offset_X + next_stage_x * BUFF_DIM_X;
+
+          copy_2d_to_shared(in_shs[next_stage % 2],  // ping-pong
+                            reinterpret_cast<const void*>(&tensor_map_input), input_global_offset_X,
+                            input_global_offset_Y, shmem_buff_size, &mbar[next_stage],
+                            is_master_thread);
         }
 
-        // Ensure all threads have finished their computation before new data over-writes the shared
-        // memory.
-        __syncthreads();
-      }
+        ptx::fence_proxy_async_shared_cta();
+
+        // Wait for the data to have arrived
+        ptx::mbarrier_wait_parity(&mbar[stage], 0);
+
+        const size_t compute_stage_x_num =
+            BUFF_DIM_X / (kHadamardDimension * (THREADS_PER_CHUNK / kThreadsPerWarp));
+        const size_t compute_stage_y_num = BUFF_DIM_Y / (kHadamardDimension * THREADS_PER_Y);
+
+        const size_t in_row_stride = BUFF_DIM_X;
+
+        IType* in_sh_ptr = in_shs[stage % 2];
+
+#pragma unroll
+        for (size_t compute_stage_y = 0; compute_stage_y < compute_stage_y_num; compute_stage_y++) {
+          const int row_idx_offset = (compute_stage_y * kHadamardDimension * THREADS_PER_Y +
+                                      threadIdx.y * kHadamardDimension);
+          const int in_row_offset = row_idx_offset * in_row_stride;
+
+#pragma unroll
+          for (size_t compute_stage_x = 0; compute_stage_x < compute_stage_x_num;
+               compute_stage_x++) {
+            ComputeKernel<IType, kHadamardDimension, BUFF_DIM_Y, BUFF_DIM_X, kReturnPreRhtAmax,
+                          kReturnIdentityAmax, kReturnTransposedAmax>(
+                had_frag_i, had_frag_t,
+                in_sh_ptr + in_row_offset +
+                    (compute_stage_x * kHadamardDimension * (THREADS_PER_CHUNK / kThreadsPerWarp)),
+                local_pre_rht_amax_reg, local_amax_reg, local_amax_t_reg);
+          } // compute_stage_x
+
+          // Ensure all threads have finished their computation before new data over-writes the shared
+          // memory.
+          __syncthreads();
+        } // compute_stage_y
+      } // stage_x
+    } // stage_y  
+    destroy_barriers<STAGES_X * STAGES_Y>(mbar, is_master_thread);
+
+    local_tile_processed++;
+  } // tile_linear, persistent loop over tiles
+
+  // end of the persistent loop, flush the local amax to global buffer again
+  if (local_tile_processed > 0) {
+    if constexpr (kReturnPreRhtAmax) {
+      unpack_max_of_packed_bf16(local_pre_rht_amax_reg, local_pre_rht_amax);
     }
+    if constexpr (kReturnIdentityAmax) {
+      unpack_max_of_packed_bf16(local_amax_reg, local_amax);
+    }
+    if constexpr (kReturnTransposedAmax) {
+      unpack_max_of_packed_bf16(local_amax_t_reg, local_amax_t);
+    }
+
+    ReduceMax<kNumWarps, kReturnPreRhtAmax, kReturnIdentityAmax, kReturnTransposedAmax>(
+        local_pre_rht_amax, local_amax, local_amax_t, max_staging_pre_rht, max_staging_identity,
+        max_staging_transpose, output_pre_rht_amax_ptr, output_identity_amax_ptr,
+        output_transpose_amax_ptr, warpid);
   }
 
-  const int warpid = (threadIdx.x + threadIdx.y * blockDim.x) / kThreadsPerWarp;
-
-  if constexpr (kReturnPreRhtAmax) {
-    unpack_max_of_packed_bf16(local_pre_rht_amax_reg, local_pre_rht_amax);
-  }
-  if constexpr (kReturnIdentityAmax) {
-    unpack_max_of_packed_bf16(local_amax_reg, local_amax);
-  }
-  if constexpr (kReturnTransposedAmax) {
-    unpack_max_of_packed_bf16(local_amax_t_reg, local_amax_t);
-  }
-
-  ReduceMax<kNumWarps, kReturnPreRhtAmax, kReturnIdentityAmax, kReturnTransposedAmax>(
-      local_pre_rht_amax, local_amax, local_amax_t, max_staging_pre_rht, max_staging_identity,
-      max_staging_transpose, output_pre_rht_amax_ptr, output_identity_amax_ptr,
-      output_transpose_amax_ptr, warpid);
-
-  destroy_barriers<STAGES_X * STAGES_Y>(mbar, is_master_thread);
 #else
   NVTE_DEVICE_ERROR("Kernel is only supported on SM 10.0+.");
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
@@ -392,6 +450,8 @@ void multi_hadamard_transform_amax(const Tensor& input_, std::vector<Tensor*>& o
                                    bool broadcast_pre_rht_amax, cudaStream_t stream) {
   NVTE_API_CALL(multi_hadamard_transform_amax);
 #if CUDA_VERSION >= 12080
+
+  int sm_count = transformer_engine::cuda::sm_count();
 
   // Check input tensor
   NVTE_CHECK(input_.scaling_mode == NVTE_DELAYED_TENSOR_SCALING,
@@ -509,9 +569,12 @@ void multi_hadamard_transform_amax(const Tensor& input_, std::vector<Tensor*>& o
   constexpr uint64_t kThreadBlockY = 1;
   constexpr uint64_t kNumWarps = kThreadBlockX * kThreadBlockY;
 
+  // 128 threads per block, 128x1
   dim3 block(kThreadBlockX * kThreadsPerWarp, kThreadBlockY);
 
-  dim3 grid(DIVUP(row_length, kChunkBlockXSmall), DIVUP(num_rows, kChunkBlockYSmall));
+  const uint64_t tiles_x = DIVUP(row_length, kChunkBlockXSmall);
+  const uint64_t tiles_y = DIVUP(num_rows, kChunkBlockYSmall);
+  const uint64_t total_tiles = tiles_x * tiles_y;
 
   TRANSFORMER_ENGINE_SWITCH_CONDITION(
       (all_return_transposed_amax && !broadcast_pre_rht_amax), kReturnTransposedAmax,
@@ -536,6 +599,22 @@ void multi_hadamard_transform_amax(const Tensor& input_, std::vector<Tensor*>& o
                   kReturnIdentityAmax, kReturnTransposedAmax>;
               cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
                                    shmem_bytes);
+
+
+              // persistent kernel launch, calculate grid size based on occupancy
+              int active_blocks_per_sm = 0;                    // for cudaOccupancyMaxActiveBlocksPerMultiprocessor
+              const int threads_per_block = block.x * block.y; // 128x1
+              cudaOccupancyMaxActiveBlocksPerMultiprocessor(&active_blocks_per_sm, (void*)kernel,
+                                                            threads_per_block, shmem_bytes);
+              // when 1 block per SM, the total number of blocks equals to the number of SMs
+              uint64_t sm_blocks = (uint64_t)sm_count * std::max(1, active_blocks_per_sm);
+              // limit the grid size to be no larger than the total number of tiles 
+              uint64_t grid_limit = std::min<uint64_t>(total_tiles, sm_blocks);
+              // limit the grid size to be no less than 1 just in case
+              uint64_t grid_x = std::max<uint64_t>(1, grid_limit);
+
+              dim3 grid(grid_x, 1);
+                     
 
               kernel<<<grid, block, shmem_bytes, stream>>>(tensor_map_input, kernel_args,
                                                            random_sign_mask, random_sign_mask_t,
