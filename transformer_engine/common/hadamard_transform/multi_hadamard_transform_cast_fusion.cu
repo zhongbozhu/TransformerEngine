@@ -288,12 +288,12 @@ multi_rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_til
   bool is_dma_warp = (warp_idx == 1);
   bool is_epilogue_warp = (warp_idx >= 4 && warp_idx <= 7);
 
-  if (is_epilogue_warp && elect_one_sync()) {
-    // prefetch to make the global amax in cache
-    for (size_t i = 0; i < kernel_args.num_tensors; ++i) {
-      cute::prefetch(raw_pointer_cast(kernel_args.global_amax_list[i]));
-    }
-  }
+  // if (is_epilogue_warp && elect_one_sync()) {
+  //   // prefetch to make the global amax in cache
+  //   for (size_t i = 0; i < kernel_args.num_tensors; ++i) {
+  //     cute::prefetch(raw_pointer_cast(kernel_args.global_amax_list[i]));
+  //   }
+  // }
 
   typename MainloopPipeline::Params mainloop_pipeline_params;
   if (is_dma_warp) {
@@ -442,6 +442,12 @@ multi_rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_til
 
     // NVFP4 non-E8 recipe constants and global scales
     static constexpr float fp4_max = 6.0f;
+  
+    // get global amax pointer 
+    float* global_amax_ptr = GetGlobalAmaxPtr(&kernel_args, tile_idx_n * 64);
+    float global_amax_val = *global_amax_ptr;
+    float global_encode_scale = ComputeGlobalEncodeScaleFP4(global_amax_val);
+    float global_decode_scale = 1.0f / global_encode_scale;
 
     auto sfd_converter = cutlass::NumericConverter<TSFC, float>{};
 
@@ -449,10 +455,16 @@ multi_rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_til
       for (int k_tile = 0; k_tile < K_TILE_MAX && k_tile + tile_idx_n < tiles_in_n; ++k_tile) {
         // get the starting index of current k-tile in global tensor, to query the correct global amax
         int cur_k_tile_global_elem_idx = (tile_idx_n + k_tile) * 64;
-        float* global_amax_ptr = GetGlobalAmaxPtr(&kernel_args, cur_k_tile_global_elem_idx);
-        const float global_amax_val = *global_amax_ptr;
-        const float global_encode_scale = ComputeGlobalEncodeScaleFP4(global_amax_val);
-        const float global_decode_scale = 1.0f / global_encode_scale;
+        float* new_global_amax_ptr = GetGlobalAmaxPtr(&kernel_args, cur_k_tile_global_elem_idx);
+        // update the scaling factors when it's no longer the same amax pointer
+        // TODO(zhongbo): the math operations are very expensive
+        // since the kernel is persistent, we can have a cache for all the possible scaling factors
+        if (new_global_amax_ptr != global_amax_ptr) {
+          global_amax_val = *new_global_amax_ptr;
+          global_encode_scale = ComputeGlobalEncodeScaleFP4(global_amax_val);
+          global_decode_scale = 1.0f / global_encode_scale;
+          global_amax_ptr = new_global_amax_ptr;
+        }
 
         Tensor tCgC_mn = tCgC(_,_,_,tile_idx_m,tile_idx_n+k_tile);
 
@@ -754,14 +766,30 @@ void multi_hadamard_transform_cast_fusion_columnwise(const Tensor &input_,
 
   // get the output buffer, this function assumes contiguous output buffer
   // so the data pointer of the first output list element will be the base pointer
-  void *output_t_data_ptr = output_list[0]->data.dptr;
-  void *scale_inv_t_ptr = output_list[0]->scale_inv.dptr;
+  // Note: because there might be empty splits, we need to find the first not null pointer
+  void *output_t_data_ptr = nullptr;
+  void *scale_inv_t_ptr = nullptr;
+  for (size_t i = 0; i < num_tensors; ++i) {
+    if (split_sections[i] > 0){
+      output_t_data_ptr = reinterpret_cast<void *>(output_list[i]->data.dptr);
+      scale_inv_t_ptr = reinterpret_cast<void *>(output_list[i]->scale_inv.dptr);
+      break;
+    }
+  }
+
+  NVTE_CHECK(output_t_data_ptr != nullptr, "Output tensor data pointer should not be nullptr.");
+  NVTE_CHECK(scale_inv_t_ptr != nullptr, "Output tensor scale inverse pointer should not be nullptr.");
 
   // construct the multi-tensor args
   MultiAmaxHadamardCastFusionArgs kernel_args;
   kernel_args.num_tensors = 0;
   kernel_args.split_sections_range[0] = 0;
   for (size_t i = 0; i < num_tensors; ++i) {
+    NVTE_CHECK(split_sections[i] % 64 == 0, "component ", i,
+      " of split_sections should be 64 multiple");
+    if (split_sections[i] == 0) {
+      continue;
+    }
     kernel_args.global_amax_list[kernel_args.num_tensors] =
         reinterpret_cast<void *>(output_list[i]->amax.dptr);
     kernel_args.split_sections_range[kernel_args.num_tensors + 1] =

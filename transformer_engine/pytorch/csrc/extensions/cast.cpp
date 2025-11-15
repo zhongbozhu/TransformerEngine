@@ -236,12 +236,13 @@ void multi_tensor_quantize_nvfp4_impl(const TensorWrapper &input,
     auto rht_matrix_nvte = makeTransformerEngineTensor(quantizer->rht_matrix);
 
     NVTE_SCOPED_GIL_RELEASE({
-      for (size_t i = 0; i < num_tensors; i++) {
-        // skip this round if input is empty
-        if (input_list[i].numel() == 0) {
-          continue;
-        }
-        if (quantizer->rowwise_usage) {
+      // rowwise quantization not yet fused
+      if (quantizer->rowwise_usage) {
+        for (size_t i = 0; i < num_tensors; i++) {
+          // skip this round if input is empty
+          if (input_list[i].numel() == 0) {
+            continue;
+          }
           TensorWrapper out_identity(output_list[i].scaling_mode());
           auto out_identity_data = output_list[i].get_rowwise_data();
           auto out_identity_scale_inv = output_list[i].get_rowwise_scale_inv();
@@ -261,41 +262,53 @@ void multi_tensor_quantize_nvfp4_impl(const TensorWrapper &input,
                              stream);
           });
         }
-
-        // already eligible for RHT columnwise cast fusion after the dimension check
-        if (quantizer->columnwise_usage) {
-          // Get the output columnwise data, scale_inv, and amax
+      }
+      // columnwise RHT quantization fusion with grouped version
+      if (quantizer->columnwise_usage) {
+        // setup the output list for the grouped kernel
+        std::vector<TensorWrapper> out_transpose_list;
+        std::vector<NVTETensor> nvte_tensor_out_transpose_list;
+        // TODO(zhongbo): can we make this less verbose?
+        for (size_t i = 0; i < num_tensors; i++) {
+          // group kernel expects the output list to have the same length with split_sections
+          // so we still need to pass a place holder tensor for empty splits
+          bool is_empty_split = input_list[i].numel() == 0;
           auto out_columnwise_data = output_list[i].get_columnwise_data();
           auto out_columnwise_scale_inv = output_list[i].get_columnwise_scale_inv();
-          // NOTE: should already be populated.
           auto out_columnwise_amax = output_list[i].get_columnwise_amax();
 
           // Create a wrapper for the columnwise output, as the rowwise output.
           // The reason is due to the input `rht_output_t` is already in the transposed layout.
           // Thus, we only need a rowwise quantization to generate the columnwise output.
           TensorWrapper out_transpose(output_list[i].scaling_mode());
-          auto colwise_data_shape = out_columnwise_data.shape;
-          std::vector<size_t> colwise_data_shape_2d;
-          colwise_data_shape_2d.push_back(colwise_data_shape.data[0]);
-          size_t last_dim = 1;
-          for (size_t i = 1; i < colwise_data_shape.ndim; ++i) {
-            last_dim *= colwise_data_shape.data[i];
-          }
-          colwise_data_shape_2d.push_back(last_dim);
+          if (!is_empty_split) {
+            auto colwise_data_shape = out_columnwise_data.shape;
+            std::vector<size_t> colwise_data_shape_2d;
+            colwise_data_shape_2d.push_back(colwise_data_shape.data[0]);
+            size_t last_dim = 1;
+            for (size_t i = 1; i < colwise_data_shape.ndim; ++i) {
+              last_dim *= colwise_data_shape.data[i];
+            }
+            colwise_data_shape_2d.push_back(last_dim);
 
-          out_transpose.set_rowwise_data(out_columnwise_data.data_ptr,
-                                         static_cast<DType>(out_columnwise_data.dtype),
-                                         colwise_data_shape_2d);
-          out_transpose.set_rowwise_scale_inv(out_columnwise_scale_inv.data_ptr,
-                                              static_cast<DType>(out_columnwise_scale_inv.dtype),
-                                              out_columnwise_scale_inv.shape);
-          out_transpose.set_amax(out_columnwise_amax.data_ptr,
-                                 static_cast<DType>(out_columnwise_amax.dtype),
-                                 out_columnwise_amax.shape);
-          nvte_hadamard_transform_cast_fusion_columnwise(input_list[i].data(), out_transpose.data(),
-                                                         rht_matrix_nvte.data(),
-                                                         quant_config_list[i], stream);
+            out_transpose.set_rowwise_data(out_columnwise_data.data_ptr,
+                                          static_cast<DType>(out_columnwise_data.dtype),
+                                          colwise_data_shape_2d);
+            out_transpose.set_rowwise_scale_inv(out_columnwise_scale_inv.data_ptr,
+                                                static_cast<DType>(out_columnwise_scale_inv.dtype),
+                                                out_columnwise_scale_inv.shape);
+            out_transpose.set_amax(out_columnwise_amax.data_ptr,
+                                  static_cast<DType>(out_columnwise_amax.dtype),
+                                  out_columnwise_amax.shape);
+          }
+          out_transpose_list.emplace_back(std::move(out_transpose));
+          nvte_tensor_out_transpose_list.push_back(out_transpose_list.back().data());
         }
+        // call the grouped kernel
+        nvte_multi_hadamard_transform_cast_fusion_columnwise(
+          input.data(), reinterpret_cast<NVTETensor *>(nvte_tensor_out_transpose_list.data()),
+          rht_matrix_nvte.data(), split_sections.data(), num_tensors, quant_config_list[0],
+          stream);
       }
     });
   } else {

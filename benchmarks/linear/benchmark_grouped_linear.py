@@ -173,7 +173,7 @@ def benchmark_linear(
     return timing_ms
 
 
-def run_benchmark_linear(mkns, recipe_name, use_bias, num_gemms=4, m_splits=None):
+def run_benchmark_linear(mkns, recipe_name, use_bias, num_gemms=4, m_splits_provided=None):
     data = []
     assert not use_bias, "Bias is not supported for GroupedLinear benchmark"
 
@@ -183,7 +183,7 @@ def run_benchmark_linear(mkns, recipe_name, use_bias, num_gemms=4, m_splits=None
         x = torch.randn((m, k), dtype=torch.bfloat16, device=device, requires_grad=True)
         ws = [torch.randn((n, k), dtype=torch.bfloat16, device=device) for _ in range(num_gemms)]
         assert m % num_gemms == 0
-        m_splits = [m // num_gemms] * num_gemms if m_splits is None else m_splits
+        m_splits = [m // num_gemms] * num_gemms if m_splits_provided is None else m_splits_provided
         # Bias is not supported for GroupedLinear benchmark
         bias = None
 
@@ -297,7 +297,7 @@ if __name__ == "__main__":
     if jagged_input_splits is not None:
         num_gemms_list = [len(jagged_input_splits)]
 
-    token_dim_list = [65536]
+    token_dim_list = [65536, 98304]
     hidden_dim_list = [7168]
     output_dim_list = [2048]
 
@@ -371,7 +371,7 @@ if __name__ == "__main__":
                 recipe_name,
                 use_bias,
                 num_gemms=num_gemms,
-                m_splits=jagged_input_splits,
+                m_splits_provided=jagged_input_splits,
             )
             df_linears = pd.concat([df_linears, df])
 

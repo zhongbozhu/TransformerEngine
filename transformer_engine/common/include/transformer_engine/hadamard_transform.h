@@ -62,6 +62,25 @@ void nvte_hadamard_transform_cast_fusion_columnwise(const NVTETensor input, NVTE
                                                     cudaStream_t stream);
 
 /*!
+ * \brief Perform the multi-tensor columnwise Hadamard transform cast fusion operation.
+ *
+ *  This function is experimental and the API is not stable.
+ *
+ *  \param[in]      input             Input tensor to apply Hadamard transform.
+ *  \param[in,out]  outputs           Array of output tensors.
+ *  \param[in]      hadamard_matrix   Hadamard matrix to use for transformation.
+ *  \param[in]      split_sections    Array specifying splits in dimension 0 for each output tensor.
+ *  \param[in]      num_tensors       Number of output tensors, must be > 0.
+ *  \param[in]      quant_config      Quantization configuration.
+ *  \param[in]      stream            CUDA stream used for the operation.
+ */
+void nvte_multi_hadamard_transform_cast_fusion_columnwise(
+    const NVTETensor input, NVTETensor* outputs, const NVTETensor hadamard_matrix,
+    const int* split_sections, const size_t num_tensors, const NVTEQuantizationConfig quant_config,
+    cudaStream_t stream);
+
+
+/*!
  * \brief Perform multi-tensor Hadamard transform absolute maximum reduction (amax) with optional randomized Hadamard transform.
  *
  *  This function is experimental and the API is not stable.
