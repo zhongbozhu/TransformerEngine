@@ -50,6 +50,15 @@ struct MultiAmaxHadamardCastFusionArgs {
   int num_tensors;
 };
 
+__device__ __forceinline__ float* GetGlobalAmaxPtr(MultiAmaxHadamardCastFusionArgs* kernel_args_ptr, int offset){
+    // check the kernel args and get the corresponding global amax pointer
+    int tensor_id = 0;
+    while (kernel_args_ptr->split_sections_range[tensor_id + 1] <= offset) {
+      ++tensor_id;
+    }
+    return reinterpret_cast<float*>(kernel_args_ptr->global_amax_list[tensor_id]);
+}
+
 // calculate the global encode scale factor for a given global amax.
 __device__ __forceinline__ float ComputeGlobalEncodeScaleFP4(const float global_amax) {
   constexpr float kFP8E4M3Max = 448.0f;
@@ -210,14 +219,6 @@ multi_rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_til
   uint32_t tile_idx_m = linear_tile_idx % tiles_in_m;
   uint32_t tile_idx_n = (linear_tile_idx / tiles_in_m) * K_TILE_MAX;
 
-  // check the kernel args and get the corresponding global amax pointer
-  float *global_amax;
-  int tensor_id = 0;
-  // while (kernel_args.split_sections_range[tensor_id + 1] <= global_offset_y) {
-  //   ++tensor_id;
-  // }
-  global_amax = reinterpret_cast<float*>(kernel_args.global_amax_list[tensor_id]);
-
   auto mainloop_tiler = Shape<_128,_16,_64>{};
   auto epilogue_tiler = Shape<_128,_64,_64>{};
   Tensor gA_mk = local_tile(mA, mainloop_tiler, make_coord(_,_, _), Step<_1, X,_1>{});
@@ -288,7 +289,10 @@ multi_rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_til
   bool is_epilogue_warp = (warp_idx >= 4 && warp_idx <= 7);
 
   if (is_epilogue_warp && elect_one_sync()) {
-    cute::prefetch(raw_pointer_cast(global_amax));
+    // prefetch to make the global amax in cache
+    for (size_t i = 0; i < kernel_args.num_tensors; ++i) {
+      cute::prefetch(raw_pointer_cast(kernel_args.global_amax_list[i]));
+    }
   }
 
   typename MainloopPipeline::Params mainloop_pipeline_params;
@@ -423,7 +427,6 @@ multi_rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_til
     accumulator_pipeline.producer_tail(accumulator_pipe_producer_state);
     tmem_allocator.free(tmem_base_ptr, TmemAllocator::Sm100TmemCapacityColumns);
   } else if (is_epilogue_warp) {
-    const float global_amax_val = *global_amax;
     static constexpr int FragmentSize = 256 / sizeof_bits_v<TC>;
 
     tmem_allocation_result_barrier.arrive_and_wait();
@@ -440,12 +443,17 @@ multi_rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_til
     // NVFP4 non-E8 recipe constants and global scales
     static constexpr float fp4_max = 6.0f;
 
-    const float global_encode_scale = ComputeGlobalEncodeScaleFP4(global_amax_val);
-    const float global_decode_scale = 1.0f / global_encode_scale;
     auto sfd_converter = cutlass::NumericConverter<TSFC, float>{};
 
     do {
       for (int k_tile = 0; k_tile < K_TILE_MAX && k_tile + tile_idx_n < tiles_in_n; ++k_tile) {
+        // get the starting index of current k-tile in global tensor, to query the correct global amax
+        int cur_k_tile_global_elem_idx = (tile_idx_n + k_tile) * 64;
+        float* global_amax_ptr = GetGlobalAmaxPtr(&kernel_args, cur_k_tile_global_elem_idx);
+        const float global_amax_val = *global_amax_ptr;
+        const float global_encode_scale = ComputeGlobalEncodeScaleFP4(global_amax_val);
+        const float global_decode_scale = 1.0f / global_encode_scale;
+
         Tensor tCgC_mn = tCgC(_,_,_,tile_idx_m,tile_idx_n+k_tile);
 
         Tensor tCgSFC_mn = gSFC_mn(_,_,tile_idx_m,tile_idx_n+k_tile);
