@@ -40,6 +40,16 @@ namespace {
 using namespace cute;
 using cute::Tensor;  // Ensure unqualified Tensor refers to cute::Tensor, not transformer_engine::Tensor
 
+constexpr int kMaxTensorsPerKernel = 64;  // Args must be <4 KB, expand 64 if needed
+struct MultiAmaxHadamardCastFusionArgs {
+  // (output) Amax buffer for pre-RHT amax buffer
+  void* global_amax_list[kMaxTensorsPerKernel];
+  // Prefix sum (with leading zero) of split_sections of each tensor of input
+  int split_sections_range[kMaxTensorsPerKernel + 1];
+  // Number of tensors (splits) being processed by kernel
+  int num_tensors;
+};
+
 // calculate the global encode scale factor for a given global amax.
 __device__ __forceinline__ float ComputeGlobalEncodeScaleFP4(const float global_amax) {
   constexpr float kFP8E4M3Max = 448.0f;
@@ -131,13 +141,13 @@ template <class MShape, class NShape, class KShape, class ClusterTileShape,
           bool kEnableStochasticRounding = false>
 __global__ static
 void
-rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_tile,
+multi_rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_tile,
             TA const* A, AStride dA, ASmemLayout sAlayout, CUTE_GRID_CONSTANT TmaLoadA const tma_load_a,
             TB const* B, BStride dB, BSmemLayout sBlayout, CUTE_GRID_CONSTANT TmaLoadB const tma_load_b,
             TC      * C, CStride dC, CSmemLayout         ,
             TSFC    * SFC,
             TiledMMA mma,
-            float const* global_amax,
+            MultiAmaxHadamardCastFusionArgs kernel_args,
             const size_t* rng_state)
 {
   using namespace cute;
@@ -200,6 +210,13 @@ rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_tile,
   uint32_t tile_idx_m = linear_tile_idx % tiles_in_m;
   uint32_t tile_idx_n = (linear_tile_idx / tiles_in_m) * K_TILE_MAX;
 
+  // check the kernel args and get the corresponding global amax pointer
+  float *global_amax;
+  int tensor_id = 0;
+  // while (kernel_args.split_sections_range[tensor_id + 1] <= global_offset_y) {
+  //   ++tensor_id;
+  // }
+  global_amax = reinterpret_cast<float*>(kernel_args.global_amax_list[tensor_id]);
 
   auto mainloop_tiler = Shape<_128,_16,_64>{};
   auto epilogue_tiler = Shape<_128,_64,_64>{};
@@ -533,18 +550,19 @@ rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_tile,
 // SFC: m x (n/16): row-major
 template <typename TA, typename TB, typename TC, typename TSFC, bool kEnableStochasticRounding = false>
 void
-rht_gemm_ntt_w_sfc(int m, int n,
+multi_rht_gemm_ntt_w_sfc(int m, int n,
         TA const* A,
         TB const* B,
         TC      * C,
         TSFC    * SFC,
-        float const* global_amax,
+        MultiAmaxHadamardCastFusionArgs* kernel_args_ptr,
         const size_t* rng_state,
         uint32_t sm_count,
         cudaStream_t stream,
         int k_tile_size = 2048)
 {
   using namespace cute;
+
 
   // Define shapes (dynamic)
   auto M = static_cast<int>(m);
@@ -636,7 +654,7 @@ rht_gemm_ntt_w_sfc(int m, int n,
   dim3 dimGrid(tiles, 1, 1);
 
   int smem_size = sizeof(SharedStorage<TA, TB, decltype(sA), decltype(sB)>);
-  auto* kernel_ptr = &rht_gemm_device<
+  auto* kernel_ptr = &multi_rht_gemm_device<
                                   decltype(M), decltype(N), decltype(k_tile_size), decltype(cga_tile_shape),
                                   TA, decltype(dA), decltype(sA), decltype(tma_load_a),
                                   TB, decltype(dB), decltype(sB), decltype(tma_load_b),
@@ -660,20 +678,21 @@ rht_gemm_ntt_w_sfc(int m, int n,
        B, dB, sB, tma_load_b,
        C, dC, sC,
        SFC,
-       mma, global_amax,
+       mma,
+       *kernel_args_ptr,
        rng_state);
 }
 
-// this function is used to wrap the rht_gemm_ntt_w_sfc function
-//to transpose the input tensor A
+// this function is used to wrap the multi_rht_gemm_ntt_w_sfc function
+// to transpose the input tensor A
 template <typename TA, typename TB, typename TC, typename TSFC, bool kEnableStochasticRounding = false>
 void
-rht_gemm_ttt_wrapper(int m, int n,
+multi_rht_gemm_ttt_wrapper(int m, int n,
         TA const* A,
         TB const* B,
         TC      * C,
         TSFC    * SFC,
-        float const* global_amax,
+        MultiAmaxHadamardCastFusionArgs* kernel_args_ptr,
         const size_t* rng_state,
         uint32_t sm_count,
         cudaStream_t stream,
@@ -689,10 +708,10 @@ rht_gemm_ttt_wrapper(int m, int n,
   // B: 16 x 16: row-major
   // C: n x m: row-major
   // SFC: n x (m/16): row-major
-  rht_gemm_ntt_w_sfc<TA, TB, TC, TSFC, kEnableStochasticRounding>(
+  multi_rht_gemm_ntt_w_sfc<TA, TB, TC, TSFC, kEnableStochasticRounding>(
     n, m,
     A, B, C,
-    SFC, global_amax,
+    SFC, kernel_args_ptr,
     rng_state,
     sm_count, stream,
     k_tile_size);
@@ -703,23 +722,47 @@ rht_gemm_ttt_wrapper(int m, int n,
 
 // clang-format on
 
-void hadamard_transform_cast_fusion_columnwise(const Tensor &input_, Tensor &output_,
-                                               const Tensor &hadamard_matrix_,
-                                               QuantizationConfig quant_config,
-                                               cudaStream_t stream) {
-  NVTE_API_CALL(hadamard_transform_cast_fusion_columnwise);
+void multi_hadamard_transform_cast_fusion_columnwise(const Tensor &input_,
+                                                     std::vector<Tensor *> &output_list,
+                                                     const int *split_sections, size_t num_tensors,
+                                                     const Tensor &hadamard_matrix_,
+                                                     QuantizationConfig &quant_config,
+                                                     cudaStream_t stream) {
+  NVTE_API_CALL(multi_hadamard_transform_cast_fusion_columnwise);
 
-  // Check input and output tensors
-  NVTE_CHECK(input_.scaling_mode == NVTE_DELAYED_TENSOR_SCALING,
-             "Input tensor must be BF16 tensor, but scaling mode is ",
-             to_string(input_.scaling_mode), ".");
+  using transformer_engine::detail::kMaxTensorsPerKernel;
+  using transformer_engine::detail::MultiAmaxHadamardCastFusionArgs;
+
   NVTE_CHECK(input_.dtype() == transformer_engine::DType::kBFloat16,
              "Input tensor must be BF16 tensor, but dtype is ", to_string(input_.dtype()), ".");
   NVTE_CHECK(input_.dim() >= 2, "Input must be a 2D tensor.");
   const SimpleTensor &input = input_.data;
-  SimpleTensor &global_amax = output_.amax;
-  SimpleTensor &output_t = output_.data;
-  SimpleTensor &scale_inv_t = output_.scale_inv;
+
+  NVTE_CHECK(output_list.size() == num_tensors,
+             "Number of output tensors should match number of tensors.");
+
+  NVTE_CHECK(num_tensors <= kMaxTensorsPerKernel,
+             "Number of tensors should be less than or equal to ", kMaxTensorsPerKernel);
+
+  // get the output buffer, this function assumes contiguous output buffer
+  // so the data pointer of the first output list element will be the base pointer
+  void *output_t_data_ptr = output_list[0]->data.dptr;
+  void *scale_inv_t_ptr = output_list[0]->scale_inv.dptr;
+
+  // construct the multi-tensor args
+  MultiAmaxHadamardCastFusionArgs kernel_args;
+  kernel_args.num_tensors = 0;
+  kernel_args.split_sections_range[0] = 0;
+  for (size_t i = 0; i < num_tensors; ++i) {
+    kernel_args.global_amax_list[kernel_args.num_tensors] =
+        reinterpret_cast<void *>(output_list[i]->amax.dptr);
+    kernel_args.split_sections_range[kernel_args.num_tensors + 1] =
+        kernel_args.split_sections_range[kernel_args.num_tensors] + split_sections[i];
+    // check overflow
+    NVTE_CHECK(kernel_args.split_sections_range[kernel_args.num_tensors + 1] >= 0,
+               "split_sections_range overflow the int32_t");
+    kernel_args.num_tensors++;
+  }
 
   // Stochastic rounding config
   const bool use_stochastic_rounding = quant_config.stochastic_rounding;
@@ -743,9 +786,7 @@ void hadamard_transform_cast_fusion_columnwise(const Tensor &input_, Tensor &out
 
   // Check Hadamard matrix
   constexpr int kHadamardDimension = 16;
-  NVTE_CHECK(hadamard_matrix_.scaling_mode == NVTE_DELAYED_TENSOR_SCALING,
-             "Hadamard matrix must be BF16 tensor, but scaling mode is ",
-             to_string(hadamard_matrix_.scaling_mode), ".");
+
   NVTE_CHECK(hadamard_matrix_.dtype() == transformer_engine::DType::kBFloat16,
              "Hadamard matrix must be BF16 tensor, but dtype is ",
              to_string(hadamard_matrix_.dtype()), ".");
@@ -801,14 +842,14 @@ void hadamard_transform_cast_fusion_columnwise(const Tensor &input_, Tensor &out
   }
   TRANSFORMER_ENGINE_SWITCH_CONDITION(
       use_stochastic_rounding, kUseStochasticRounding,
-      detail::rht_gemm_ttt_wrapper<TA, TB, TC, TSFC, kUseStochasticRounding>(
+      detail::multi_rht_gemm_ttt_wrapper<TA, TB, TC, TSFC, kUseStochasticRounding>(
           /*m=*/m,
           /*n=*/n,
           /*A=*/reinterpret_cast<TA const *>(input.dptr),
           /*B=*/reinterpret_cast<TB const *>(hadamard_matrix.dptr),
-          /*C=*/reinterpret_cast<TC *>(output_t.dptr),
-          /*SFC=*/reinterpret_cast<TSFC *>(scale_inv_t.dptr),
-          /*global_amax=*/reinterpret_cast<float const *>(global_amax.dptr),
+          /*C=*/reinterpret_cast<TC *>(output_t_data_ptr),
+          /*SFC=*/reinterpret_cast<TSFC *>(scale_inv_t_ptr),
+          /*kernel_args_ptr=*/&kernel_args,
           /*rng_state=*/rng_state,
           /*sm_count=*/sm_count,
           /*stream=*/stream,
@@ -817,17 +858,27 @@ void hadamard_transform_cast_fusion_columnwise(const Tensor &input_, Tensor &out
 
 }  // namespace transformer_engine
 
-void nvte_hadamard_transform_cast_fusion_columnwise(const NVTETensor input, NVTETensor output,
-                                                    const NVTETensor hadamard_matrix,
-                                                    const NVTEQuantizationConfig quant_config,
-                                                    cudaStream_t stream) {
-  NVTE_API_CALL(nvte_hadamard_transform_cast_fusion_columnwise);
+void nvte_multi_hadamard_transform_cast_fusion_columnwise(
+    const NVTETensor input, NVTETensor *outputs, const NVTETensor hadamard_matrix,
+    const int *split_sections, const size_t num_tensors, const NVTEQuantizationConfig quant_config,
+    cudaStream_t stream) {
+  NVTE_API_CALL(nvte_multi_hadamard_transform_cast_fusion_columnwise);
   using namespace transformer_engine;
+  NVTE_CHECK(num_tensors > 0, "Number of tensors should be greater than 0.");
+
+  Tensor *input_tensor = convertNVTETensorCheck(input);
+  std::vector<Tensor *> output_list(num_tensors);
+  for (size_t i = 0; i < num_tensors; ++i) {
+    output_list[i] = convertNVTETensorCheck(outputs[i]);
+  }
+
   QuantizationConfig quant_config_cpp;
   if (quant_config != nullptr) {
     quant_config_cpp = *reinterpret_cast<QuantizationConfig *>(quant_config);
   }
-  hadamard_transform_cast_fusion_columnwise(
-      *convertNVTETensorCheck(input), *convertNVTETensorCheck(output),
+
+  // Call the multi-tensor Hadamard transform amax implementation.
+  multi_hadamard_transform_cast_fusion_columnwise(
+      *input_tensor, output_list, split_sections, num_tensors,
       *convertNVTETensorCheck(hadamard_matrix), quant_config_cpp, stream);
 }
