@@ -173,8 +173,7 @@ void
 multi_rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_tile,
             TA const* A, AStride dA, ASmemLayout sAlayout, CUTE_GRID_CONSTANT TmaLoadA const tma_load_a,
             TB const* B, BStride dB, BSmemLayout sBlayout, CUTE_GRID_CONSTANT TmaLoadB const tma_load_b,
-            TC      * C, CStride dC, CSmemLayout         ,
-            TSFC    * SFC,
+            CSmemLayout,
             TiledMMA mma,
             MultiAmaxHadamardCastFusionArgs kernel_args,
             const size_t* rng_state)
@@ -264,24 +263,24 @@ multi_rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_til
     int split_N_i = kernel_args.split_sections[i];   // must be multiple of 64
     int n_tiles_i = split_N_i / 64;                  // # of 64-wide tiles in N
     int sfc_row_stride_i = split_N_i / 16;           // # SFC elements per row
-  
+
     // Base pointer for this tensor’s SFC buffer
     auto* SFC_i = reinterpret_cast<TSFC*>(
         kernel_args.output_colwise_scale_inv_list[i]);
-  
+
     // Shape and stride for this tensor’s SFC
     auto sfc_shape_i = make_shape(
         M,
         make_shape( make_shape(Int<16>{}, _4{}), n_tiles_i )
     );
-  
+
     auto sfc_stride_i = make_stride(
         sfc_row_stride_i,
         make_stride( make_stride(_0{}, _1{}), _4{} )
     );
-  
+
     auto sfc_layout_i = make_layout(sfc_shape_i, sfc_stride_i);
-  
+
     // Final tensor for this SFC slice
     mSFCs[i] = make_tensor(
         make_gmem_ptr(SFC_i),
@@ -711,8 +710,6 @@ void
 multi_rht_gemm_ntt_w_sfc(int m, int n,
         TA const* A,
         TB const* B,
-        TC      * C,
-        TSFC    * SFC,
         MultiAmaxHadamardCastFusionArgs* kernel_args_ptr,
         const size_t* rng_state,
         uint32_t sm_count,
@@ -729,8 +726,6 @@ multi_rht_gemm_ntt_w_sfc(int m, int n,
   // Define strides (mixed)
   auto dA = make_stride(Int<1>{}, m);  // (dM,dK)
   auto dB = make_stride(Int<1>{}, 16);  // (dN,dK)
-  // TODO(zhongbo): remove dC after testing
-  auto dC = make_stride(n, Int<1>{});  // (dM,dN)
   for (size_t i = 0; i < kernel_args_ptr->num_tensors; ++i) {
     kernel_args_ptr->output_stride2d_list[i] = make_stride(kernel_args_ptr->split_sections[i], Int<1>{});
   }
@@ -820,7 +815,7 @@ multi_rht_gemm_ntt_w_sfc(int m, int n,
                                   decltype(M), decltype(N), decltype(k_tile_size), decltype(cga_tile_shape),
                                   TA, decltype(dA), decltype(sA), decltype(tma_load_a),
                                   TB, decltype(dB), decltype(sB), decltype(tma_load_b),
-                                  TC, decltype(dC), decltype(sC),
+                                  TC, Stride2D, decltype(sC),
                                   TSFC,
                                   decltype(mma),
                                   kNumTensorsPow2,
@@ -839,9 +834,7 @@ multi_rht_gemm_ntt_w_sfc(int m, int n,
       (M,  N,  k_tile_size, cga_tile_shape,
        A, dA, sA, tma_load_a,
        B, dB, sB, tma_load_b,
-       C, dC, sC,
-       SFC,
-       mma,
+       sC, mma,
        *kernel_args_ptr,
        rng_state);
 }
@@ -853,8 +846,6 @@ void
 multi_rht_gemm_ttt_wrapper(int m, int n,
         TA const* A,
         TB const* B,
-        TC      * C,
-        TSFC    * SFC,
         MultiAmaxHadamardCastFusionArgs* kernel_args_ptr,
         const size_t* rng_state,
         uint32_t sm_count,
@@ -873,8 +864,8 @@ multi_rht_gemm_ttt_wrapper(int m, int n,
   // SFC: n x (m/16): row-major
   multi_rht_gemm_ntt_w_sfc<TA, TB, TC, TSFC, kNumTensorsPow2, kEnableStochasticRounding>(
     n, m,
-    A, B, C,
-    SFC, kernel_args_ptr,
+    A, B,
+    kernel_args_ptr,
     rng_state,
     sm_count, stream,
     k_tile_size);
@@ -906,23 +897,6 @@ void multi_hadamard_transform_cast_fusion_columnwise(const Tensor &input_,
 
   NVTE_CHECK(num_tensors <= kMaxTensorsPerKernel,
              "Number of tensors should be less than or equal to ", kMaxTensorsPerKernel);
-
-  // get the output buffer, this function assumes contiguous output buffer
-  // so the data pointer of the first output list element will be the base pointer
-  // Note: because there might be empty splits, we need to find the first not null pointer
-  void *output_t_data_ptr = nullptr;
-  void *scale_inv_t_ptr = nullptr;
-  for (size_t i = 0; i < num_tensors; ++i) {
-    if (split_sections[i] > 0) {
-      output_t_data_ptr = reinterpret_cast<void *>(output_list[i]->data.dptr);
-      scale_inv_t_ptr = reinterpret_cast<void *>(output_list[i]->scale_inv.dptr);
-      break;
-    }
-  }
-
-  NVTE_CHECK(output_t_data_ptr != nullptr, "Output tensor data pointer should not be nullptr.");
-  NVTE_CHECK(scale_inv_t_ptr != nullptr,
-             "Output tensor scale inverse pointer should not be nullptr.");
 
   // construct the multi-tensor args
   MultiAmaxHadamardCastFusionArgs kernel_args;
@@ -1037,18 +1011,16 @@ void multi_hadamard_transform_cast_fusion_columnwise(const Tensor &input_,
   }
 
   switch (pow2_num_tensors_to_process) {
-#define CALL_WRAPPER(kNumTensorsPow2)                                                            \
-  case kNumTensorsPow2:                                                                          \
-    TRANSFORMER_ENGINE_SWITCH_CONDITION(                                                         \
-        use_stochastic_rounding, kUseStochasticRounding,                                         \
-        detail::multi_rht_gemm_ttt_wrapper<TA, TB, TC, TSFC, kNumTensorsPow2,                    \
-                                           kUseStochasticRounding>(                              \
-            /*m=*/m, /*n=*/n, /*A=*/reinterpret_cast<TA const *>(input.dptr),                    \
-            /*B=*/reinterpret_cast<TB const *>(hadamard_matrix.dptr),                            \
-            /*C=*/reinterpret_cast<TC *>(output_t_data_ptr),                                     \
-            /*SFC=*/reinterpret_cast<TSFC *>(scale_inv_t_ptr), /*kernel_args_ptr=*/&kernel_args, \
-            /*rng_state=*/rng_state, /*sm_count=*/sm_count, /*stream=*/stream,                   \
-            /*k_tile_size=*/k_tile_size););                                                      \
+#define CALL_WRAPPER(kNumTensorsPow2)                                                         \
+  case kNumTensorsPow2:                                                                       \
+    TRANSFORMER_ENGINE_SWITCH_CONDITION(                                                      \
+        use_stochastic_rounding, kUseStochasticRounding,                                      \
+        detail::multi_rht_gemm_ttt_wrapper<TA, TB, TC, TSFC, kNumTensorsPow2,                 \
+                                           kUseStochasticRounding>(                           \
+            /*m=*/m, /*n=*/n, /*A=*/reinterpret_cast<TA const *>(input.dptr),                 \
+            /*B=*/reinterpret_cast<TB const *>(hadamard_matrix.dptr),                         \
+            /*kernel_args_ptr=*/&kernel_args, /*rng_state=*/rng_state, /*sm_count=*/sm_count, \
+            /*stream=*/stream, /*k_tile_size=*/k_tile_size););                                \
     break;
 
     CALL_WRAPPER(1)
