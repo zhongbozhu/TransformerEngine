@@ -237,18 +237,57 @@ multi_rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_til
     );
   }
 
-  auto sfc_shape  = make_shape(
-    M,
-    make_shape( make_shape(Int<16>{}, _4{}), N / 64 )
+  using TensorSFC = decltype(
+    make_tensor(
+        make_gmem_ptr((TSFC*)nullptr),
+        make_layout(
+            make_shape(
+                int{},                                   // M
+                make_shape( make_shape(Int<16>{}, _4{}), // (16, 4)
+                            int{} )                      // n_tiles = split / 64
+            ),
+            make_stride(
+                int{},                                   // dM = (split / 16)
+                make_stride( make_stride(_0{}, _1{}),    // inner (16,4) layout
+                              _4{} )                     // tiles stride
+            )
+        )
+    )
   );
 
-  auto sfc_stride = make_stride(
-    N / 16,
-    make_stride( make_stride(_0{}, _1{}), _4{} )
-  );
+  // Array of SFC tensors, capacity = kNumTensorsPow2, but we only use
+  // [0 .. kernel_args.num_tensors) in practice.
+  TensorSFC mSFCs[kNumTensorsPow2];
 
-  auto sfc_layout = make_layout(sfc_shape, sfc_stride);
-  Tensor mSFC = make_tensor(make_gmem_ptr(SFC), sfc_layout);
+  for (size_t i = 0; i < kernel_args.num_tensors; ++i) {
+    // Per-tensor split length along the original N dimension
+    int split_N_i = kernel_args.split_sections[i];   // must be multiple of 64
+    int n_tiles_i = split_N_i / 64;                  // # of 64-wide tiles in N
+    int sfc_row_stride_i = split_N_i / 16;           // # SFC elements per row
+  
+    // Base pointer for this tensor’s SFC buffer
+    auto* SFC_i = reinterpret_cast<TSFC*>(
+        kernel_args.output_colwise_scale_inv_list[i]);
+  
+    // Shape and stride for this tensor’s SFC
+    auto sfc_shape_i = make_shape(
+        M,
+        make_shape( make_shape(Int<16>{}, _4{}), n_tiles_i )
+    );
+  
+    auto sfc_stride_i = make_stride(
+        sfc_row_stride_i,
+        make_stride( make_stride(_0{}, _1{}), _4{} )
+    );
+  
+    auto sfc_layout_i = make_layout(sfc_shape_i, sfc_stride_i);
+  
+    // Final tensor for this SFC slice
+    mSFCs[i] = make_tensor(
+        make_gmem_ptr(SFC_i),
+        sfc_layout_i
+    );
+  }
 
   auto cluster_shape = Shape<  _1,  _1, _1>{};
 
@@ -289,7 +328,28 @@ multi_rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_til
     );
   }
 
-  Tensor gSFC_mn = local_tile(mSFC, epilogue_tiler, make_coord(_,_, _), Step<_1,_1, X>{});  // (BLK_M,BLK_N)
+  // Tensor gSFC_mn = local_tile(mSFC, epilogue_tiler, make_coord(_,_, _), Step<_1,_1, X>{});  // (BLK_M,BLK_N)
+  using TensorGSFC = decltype(
+      local_tile(
+          std::declval<TensorSFC>(),
+          decltype(epilogue_tiler){},
+          make_coord(_, _, _),
+          Step<_1, _1, X>{}
+      )
+  );
+
+  // One tiled SFC view per split
+  TensorGSFC gSFCs_mn[kNumTensorsPow2];
+
+  for (size_t i = 0; i < kernel_args.num_tensors; ++i) {
+    gSFCs_mn[i] = local_tile(
+        mSFCs[i],
+        epilogue_tiler,
+        make_coord(_, _, _),
+        Step<_1, _1, X>{}   // (BLK_M, BLK_N-like)
+    );
+  }
+
   // Allocate SMEM
   extern __shared__ char shared_memory[];
   using SharedStorage = SharedStorage<TA, TB, ASmemLayout, BSmemLayout>;
@@ -512,6 +572,7 @@ multi_rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_til
     int tensor_id = GetTensorId(&kernel_args, tile_idx_n * 64);
     float* global_amax_ptr = GetGlobalAmaxPtrByTensorId(&kernel_args, tensor_id);
     Tensor tCgC = thr_mma_epilogue.partition_C(gCs_mn[tensor_id]);
+    Tensor gSFC_mn = gSFCs_mn[tensor_id];
 
     float global_amax_val = *global_amax_ptr;
     float global_encode_scale = ComputeGlobalEncodeScaleFP4(global_amax_val);
@@ -534,15 +595,16 @@ multi_rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_til
           global_encode_scale = ComputeGlobalEncodeScaleFP4(global_amax_val);
           global_decode_scale = 1.0f / global_encode_scale;
           tCgC = thr_mma_epilogue.partition_C(gCs_mn[new_tensor_id]);
+          gSFC_mn = gSFCs_mn[new_tensor_id];
           tensor_id = new_tensor_id;
         }
         // maybe udpated to the new tensor id
         int tensor_start_elem = kernel_args.split_sections_range[tensor_id];
         int local_tile_idx_n = (cur_k_tile_global_elem_idx - tensor_start_elem) / 64;
-        // Tensor tCgC_mn = tCgC(_,_,_,tile_idx_m,tile_idx_n+k_tile);
-        Tensor tCgC_mn = tCgC(_,_,_,tile_idx_m,local_tile_idx_n);
 
-        Tensor tCgSFC_mn = gSFC_mn(_,_,tile_idx_m,tile_idx_n+k_tile);
+        Tensor tCgC_mn = tCgC(_,_,_,tile_idx_m,local_tile_idx_n);
+        Tensor tCgSFC_mn = gSFC_mn(_,_,tile_idx_m,local_tile_idx_n);
+
         accumulator_pipeline.consumer_wait(accumulator_pipe_consumer_state);
 
         auto tCtC = bulk_tmem_epilogue(_,_,_,accumulator_pipe_consumer_state.index());
