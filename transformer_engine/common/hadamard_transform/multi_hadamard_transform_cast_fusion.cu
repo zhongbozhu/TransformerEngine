@@ -40,23 +40,42 @@ namespace {
 using namespace cute;
 using cute::Tensor;  // Ensure unqualified Tensor refers to cute::Tensor, not transformer_engine::Tensor
 
+using Stride2D = cute::Stride<int, cute::Int<1>>;
+
 constexpr int kMaxTensorsPerKernel = 64;  // Args must be <4 KB, expand 64 if needed
 struct MultiAmaxHadamardCastFusionArgs {
   // (output) Amax buffer for pre-RHT amax buffer
   void* global_amax_list[kMaxTensorsPerKernel];
+  // output C pointers for each tensor
+  void* output_colwise_list[kMaxTensorsPerKernel];
+  // output scale inverse pointers for each tensor
+  void* output_colwise_scale_inv_list[kMaxTensorsPerKernel];
+  // split sections of each tensor of input
+  int split_sections[kMaxTensorsPerKernel];
   // Prefix sum (with leading zero) of split_sections of each tensor of input
   int split_sections_range[kMaxTensorsPerKernel + 1];
+  // stride 2D struct for CUTE
+  Stride2D output_stride2d_list[kMaxTensorsPerKernel];
   // Number of tensors (splits) being processed by kernel
   int num_tensors;
 };
 
-__device__ __forceinline__ float* GetGlobalAmaxPtr(MultiAmaxHadamardCastFusionArgs* kernel_args_ptr, int offset){
-    // check the kernel args and get the corresponding global amax pointer
-    int tensor_id = 0;
-    while (kernel_args_ptr->split_sections_range[tensor_id + 1] <= offset) {
-      ++tensor_id;
-    }
-    return reinterpret_cast<float*>(kernel_args_ptr->global_amax_list[tensor_id]);
+
+__device__ __forceinline__ float* GetGlobalAmaxPtrByTensorId(MultiAmaxHadamardCastFusionArgs* kernel_args_ptr, int tensor_id){
+  // directly returns the global amax pointer by tensor id
+  if (tensor_id < 0 || tensor_id >= kernel_args_ptr->num_tensors) {
+    return nullptr;
+  }
+  return reinterpret_cast<float*>(kernel_args_ptr->global_amax_list[tensor_id]);
+}
+
+__device__ __forceinline__ int GetTensorId(MultiAmaxHadamardCastFusionArgs* kernel_args_ptr, int offset){
+  // check the kernel args and get the corresponding id
+  int tensor_id = 0;
+  while (kernel_args_ptr->split_sections_range[tensor_id + 1] <= offset) {
+    ++tensor_id;
+  }
+  return tensor_id;
 }
 
 // calculate the global encode scale factor for a given global amax.
@@ -147,6 +166,7 @@ template <class MShape, class NShape, class KShape, class ClusterTileShape,
           class TC, class CStride, class CSmemLayout,
           class TSFC,
           class TiledMMA,
+          int kNumTensorsPow2,
           bool kEnableStochasticRounding = false>
 __global__ static
 void
@@ -191,7 +211,31 @@ multi_rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_til
   // Represent the full tensors
   Tensor mA = tma_load_a.get_tma_tensor(make_shape(M,N));
   Tensor mB = tma_load_b.get_tma_tensor(make_shape(16,16));
-  Tensor mC = make_tensor(cute::subbyte_iterator<TC>(C), make_shape(M,N), dC);      // (M,N)
+  // Tensor mC = make_tensor(cute::subbyte_iterator<TC>(C), make_shape(M,N), dC);      // (M,N)
+
+  using TensorC = decltype(
+      make_tensor(
+          subbyte_iterator<TC>((TC*)nullptr),    // engine
+          make_shape(int{}, int{}),              // (M, N_i)
+          Stride2D{}                             // stride (dM, dN)
+      )
+  );
+
+  // make an array of mCs with capacity kNumTensorsPow2,
+  // but kernel_args.num_tensors is its real size
+  TensorC mCs[kNumTensorsPow2];
+
+  for (size_t i = 0; i < kernel_args.num_tensors; ++i) {
+    auto* output_C_i    = reinterpret_cast<TC*>(kernel_args.output_colwise_list[i]);
+    int   output_C_n_i  = kernel_args.split_sections[i];
+    Stride2D stride2d_C_i = kernel_args.output_stride2d_list[i];
+
+    mCs[i] = cute::make_tensor(
+        cute::subbyte_iterator<TC>(output_C_i),
+        cute::make_shape(static_cast<int>(M), output_C_n_i),  // (M, N_i)
+        stride2d_C_i
+    );
+  }
 
   auto sfc_shape  = make_shape(
     M,
@@ -223,7 +267,27 @@ multi_rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_til
   auto epilogue_tiler = Shape<_128,_64,_64>{};
   Tensor gA_mk = local_tile(mA, mainloop_tiler, make_coord(_,_, _), Step<_1, X,_1>{});
   Tensor gB_nk = local_tile(mB, cluster_tile, make_coord(_,_, _), Step< X,_1,_1>{});  // (BLK_N,BLK_K,k)
-  Tensor gC_mn = local_tile(mC, epilogue_tiler, make_coord(_,_, _), Step<_1,_1, X>{});  // (BLK_M,BLK_N)
+  // Tensor gC_mn = local_tile(mC, epilogue_tiler, make_coord(_,_, _), Step<_1,_1, X>{});  // (BLK_M,BLK_N)
+
+  using TensorGC = decltype(
+    local_tile(
+        std::declval<TensorC>(),
+        decltype(epilogue_tiler){},
+        make_coord(_, _, _),
+        Step<_1, _1, X>{}
+    )
+  );
+
+  TensorGC gCs_mn[kNumTensorsPow2];
+
+  for (size_t i = 0; i < kernel_args.num_tensors; ++i) {
+    gCs_mn[i] = local_tile(
+        mCs[i],
+        epilogue_tiler,
+        make_coord(_, _, _),
+        Step<_1, _1, X>{}   // (BLK_M, BLK_N)
+    );
+  }
 
   Tensor gSFC_mn = local_tile(mSFC, epilogue_tiler, make_coord(_,_, _), Step<_1,_1, X>{});  // (BLK_M,BLK_N)
   // Allocate SMEM
@@ -434,7 +498,7 @@ multi_rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_til
     bulk_tmem_epilogue.data() = tmem_base_ptr;
     int thread_idx = threadIdx.x % 128;
 
-    Tensor tCgC = thr_mma_epilogue.partition_C(gC_mn);                             // (MMA,MMA_M,MMA_N)                             // (MMA,MMA_M,MMA_N)
+    // Tensor tCgC = thr_mma_epilogue.partition_C(gC_mn);                             // (MMA,MMA_M,MMA_N)
     auto tiled_t2r = make_tmem_copy(TMEM_LOAD_NEW{}, bulk_tmem_epilogue(_,_,_,_0{}));
     auto tiled_r2g = make_tiled_copy_D(Copy_Atom<SM100_STORE_256bit_CACHE_NOALLOCATION, TC>{}, tiled_t2r);
     auto thr_t2r   = tiled_t2r.get_slice(thread_idx);
@@ -442,9 +506,13 @@ multi_rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_til
 
     // NVFP4 non-E8 recipe constants and global scales
     static constexpr float fp4_max = 6.0f;
-  
-    // get global amax pointer 
-    float* global_amax_ptr = GetGlobalAmaxPtr(&kernel_args, tile_idx_n * 64);
+
+    // get global amax pointer
+    // float* global_amax_ptr = GetGlobalAmaxPtr(&kernel_args, tile_idx_n * 64);
+    int tensor_id = GetTensorId(&kernel_args, tile_idx_n * 64);
+    float* global_amax_ptr = GetGlobalAmaxPtrByTensorId(&kernel_args, tensor_id);
+    Tensor tCgC = thr_mma_epilogue.partition_C(gCs_mn[tensor_id]);
+
     float global_amax_val = *global_amax_ptr;
     float global_encode_scale = ComputeGlobalEncodeScaleFP4(global_amax_val);
     float global_decode_scale = 1.0f / global_encode_scale;
@@ -455,18 +523,24 @@ multi_rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_til
       for (int k_tile = 0; k_tile < K_TILE_MAX && k_tile + tile_idx_n < tiles_in_n; ++k_tile) {
         // get the starting index of current k-tile in global tensor, to query the correct global amax
         int cur_k_tile_global_elem_idx = (tile_idx_n + k_tile) * 64;
-        float* new_global_amax_ptr = GetGlobalAmaxPtr(&kernel_args, cur_k_tile_global_elem_idx);
+        int new_tensor_id = GetTensorId(&kernel_args, cur_k_tile_global_elem_idx);
+        // float* new_global_amax_ptr = GetGlobalAmaxPtr(&kernel_args, cur_k_tile_global_elem_idx);
+        global_amax_ptr = GetGlobalAmaxPtrByTensorId(&kernel_args, new_tensor_id);
         // update the scaling factors when it's no longer the same amax pointer
         // TODO(zhongbo): the math operations are very expensive
         // since the kernel is persistent, we can have a cache for all the possible scaling factors
-        if (new_global_amax_ptr != global_amax_ptr) {
-          global_amax_val = *new_global_amax_ptr;
+        if (tensor_id != new_tensor_id) {
+          global_amax_val = *global_amax_ptr;
           global_encode_scale = ComputeGlobalEncodeScaleFP4(global_amax_val);
           global_decode_scale = 1.0f / global_encode_scale;
-          global_amax_ptr = new_global_amax_ptr;
+          tCgC = thr_mma_epilogue.partition_C(gCs_mn[new_tensor_id]);
+          tensor_id = new_tensor_id;
         }
-
-        Tensor tCgC_mn = tCgC(_,_,_,tile_idx_m,tile_idx_n+k_tile);
+        // maybe udpated to the new tensor id
+        int tensor_start_elem = kernel_args.split_sections_range[tensor_id];
+        int local_tile_idx_n = (cur_k_tile_global_elem_idx - tensor_start_elem) / 64;
+        // Tensor tCgC_mn = tCgC(_,_,_,tile_idx_m,tile_idx_n+k_tile);
+        Tensor tCgC_mn = tCgC(_,_,_,tile_idx_m,local_tile_idx_n);
 
         Tensor tCgSFC_mn = gSFC_mn(_,_,tile_idx_m,tile_idx_n+k_tile);
         accumulator_pipeline.consumer_wait(accumulator_pipe_consumer_state);
@@ -553,6 +627,8 @@ multi_rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_til
 
         copy(tiled_r2g, src, dst);
 
+        // copy(AutoVectorizingCopyWithAssumedAlignment<128>{}, tDrC, tDgC);
+
         copy(AutoVectorizingCopyWithAssumedAlignment<128>{}, tDrSFC, tDgSFC);
 
       }
@@ -568,7 +644,7 @@ multi_rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_til
 // B: 16 x 16: row-major
 // C: m x n: row-major
 // SFC: m x (n/16): row-major
-template <typename TA, typename TB, typename TC, typename TSFC, bool kEnableStochasticRounding = false>
+template <typename TA, typename TB, typename TC, typename TSFC, int kNumTensorsPow2, bool kEnableStochasticRounding = false>
 void
 multi_rht_gemm_ntt_w_sfc(int m, int n,
         TA const* A,
@@ -591,7 +667,11 @@ multi_rht_gemm_ntt_w_sfc(int m, int n,
   // Define strides (mixed)
   auto dA = make_stride(Int<1>{}, m);  // (dM,dK)
   auto dB = make_stride(Int<1>{}, 16);  // (dN,dK)
+  // TODO(zhongbo): remove dC after testing
   auto dC = make_stride(n, Int<1>{});  // (dM,dN)
+  for (size_t i = 0; i < kernel_args_ptr->num_tensors; ++i) {
+    kernel_args_ptr->output_stride2d_list[i] = make_stride(kernel_args_ptr->split_sections[i], Int<1>{});
+  }
 
   auto cga_shape      = Shape<  _1,  _1, _1>{};
   auto cga_tile_shape = Shape<_128,_16,_16>{};
@@ -681,6 +761,7 @@ multi_rht_gemm_ntt_w_sfc(int m, int n,
                                   TC, decltype(dC), decltype(sC),
                                   TSFC,
                                   decltype(mma),
+                                  kNumTensorsPow2,
                                   kEnableStochasticRounding>;
 
   bool status = cudaFuncSetAttribute(*kernel_ptr,
@@ -705,7 +786,7 @@ multi_rht_gemm_ntt_w_sfc(int m, int n,
 
 // this function is used to wrap the multi_rht_gemm_ntt_w_sfc function
 // to transpose the input tensor A
-template <typename TA, typename TB, typename TC, typename TSFC, bool kEnableStochasticRounding = false>
+template <typename TA, typename TB, typename TC, typename TSFC, int kNumTensorsPow2, bool kEnableStochasticRounding = false>
 void
 multi_rht_gemm_ttt_wrapper(int m, int n,
         TA const* A,
@@ -728,7 +809,7 @@ multi_rht_gemm_ttt_wrapper(int m, int n,
   // B: 16 x 16: row-major
   // C: n x m: row-major
   // SFC: n x (m/16): row-major
-  multi_rht_gemm_ntt_w_sfc<TA, TB, TC, TSFC, kEnableStochasticRounding>(
+  multi_rht_gemm_ntt_w_sfc<TA, TB, TC, TSFC, kNumTensorsPow2, kEnableStochasticRounding>(
     n, m,
     A, B, C,
     SFC, kernel_args_ptr,
@@ -770,7 +851,7 @@ void multi_hadamard_transform_cast_fusion_columnwise(const Tensor &input_,
   void *output_t_data_ptr = nullptr;
   void *scale_inv_t_ptr = nullptr;
   for (size_t i = 0; i < num_tensors; ++i) {
-    if (split_sections[i] > 0){
+    if (split_sections[i] > 0) {
       output_t_data_ptr = reinterpret_cast<void *>(output_list[i]->data.dptr);
       scale_inv_t_ptr = reinterpret_cast<void *>(output_list[i]->scale_inv.dptr);
       break;
@@ -778,7 +859,8 @@ void multi_hadamard_transform_cast_fusion_columnwise(const Tensor &input_,
   }
 
   NVTE_CHECK(output_t_data_ptr != nullptr, "Output tensor data pointer should not be nullptr.");
-  NVTE_CHECK(scale_inv_t_ptr != nullptr, "Output tensor scale inverse pointer should not be nullptr.");
+  NVTE_CHECK(scale_inv_t_ptr != nullptr,
+             "Output tensor scale inverse pointer should not be nullptr.");
 
   // construct the multi-tensor args
   MultiAmaxHadamardCastFusionArgs kernel_args;
@@ -786,12 +868,18 @@ void multi_hadamard_transform_cast_fusion_columnwise(const Tensor &input_,
   kernel_args.split_sections_range[0] = 0;
   for (size_t i = 0; i < num_tensors; ++i) {
     NVTE_CHECK(split_sections[i] % 64 == 0, "component ", i,
-      " of split_sections should be 64 multiple");
+               " of split_sections should be 64 multiple");
     if (split_sections[i] == 0) {
       continue;
     }
     kernel_args.global_amax_list[kernel_args.num_tensors] =
         reinterpret_cast<void *>(output_list[i]->amax.dptr);
+    // TODO(zhongbo): should we change API assumption to use columnwise_data instead of data?
+    kernel_args.output_colwise_list[kernel_args.num_tensors] =
+        reinterpret_cast<void *>(output_list[i]->data.dptr);
+    kernel_args.output_colwise_scale_inv_list[kernel_args.num_tensors] =
+        reinterpret_cast<void *>(output_list[i]->scale_inv.dptr);
+    kernel_args.split_sections[kernel_args.num_tensors] = split_sections[i];
     kernel_args.split_sections_range[kernel_args.num_tensors + 1] =
         kernel_args.split_sections_range[kernel_args.num_tensors] + split_sections[i];
     // check overflow
@@ -799,6 +887,9 @@ void multi_hadamard_transform_cast_fusion_columnwise(const Tensor &input_,
                "split_sections_range overflow the int32_t");
     kernel_args.num_tensors++;
   }
+
+  // this value already excludes the zero split sections
+  int num_tensors_to_process = kernel_args.num_tensors;
 
   // Stochastic rounding config
   const bool use_stochastic_rounding = quant_config.stochastic_rounding;
@@ -876,20 +967,43 @@ void multi_hadamard_transform_cast_fusion_columnwise(const Tensor &input_,
   } else if (m < 1024 || n < 1024) {
     k_tile_size = 512;
   }
-  TRANSFORMER_ENGINE_SWITCH_CONDITION(
-      use_stochastic_rounding, kUseStochasticRounding,
-      detail::multi_rht_gemm_ttt_wrapper<TA, TB, TC, TSFC, kUseStochasticRounding>(
-          /*m=*/m,
-          /*n=*/n,
-          /*A=*/reinterpret_cast<TA const *>(input.dptr),
-          /*B=*/reinterpret_cast<TB const *>(hadamard_matrix.dptr),
-          /*C=*/reinterpret_cast<TC *>(output_t_data_ptr),
-          /*SFC=*/reinterpret_cast<TSFC *>(scale_inv_t_ptr),
-          /*kernel_args_ptr=*/&kernel_args,
-          /*rng_state=*/rng_state,
-          /*sm_count=*/sm_count,
-          /*stream=*/stream,
-          /*k_tile_size=*/k_tile_size););
+
+  // Find the next larger power of 2 for num_tensors_to_process
+  int pow2_num_tensors_to_process = 1;
+  while (pow2_num_tensors_to_process < static_cast<int>(num_tensors_to_process)) {
+    pow2_num_tensors_to_process <<= 1;
+  }
+
+  switch (pow2_num_tensors_to_process) {
+#define CALL_WRAPPER(kNumTensorsPow2)                                                            \
+  case kNumTensorsPow2:                                                                          \
+    TRANSFORMER_ENGINE_SWITCH_CONDITION(                                                         \
+        use_stochastic_rounding, kUseStochasticRounding,                                         \
+        detail::multi_rht_gemm_ttt_wrapper<TA, TB, TC, TSFC, kNumTensorsPow2,                    \
+                                           kUseStochasticRounding>(                              \
+            /*m=*/m, /*n=*/n, /*A=*/reinterpret_cast<TA const *>(input.dptr),                    \
+            /*B=*/reinterpret_cast<TB const *>(hadamard_matrix.dptr),                            \
+            /*C=*/reinterpret_cast<TC *>(output_t_data_ptr),                                     \
+            /*SFC=*/reinterpret_cast<TSFC *>(scale_inv_t_ptr), /*kernel_args_ptr=*/&kernel_args, \
+            /*rng_state=*/rng_state, /*sm_count=*/sm_count, /*stream=*/stream,                   \
+            /*k_tile_size=*/k_tile_size););                                                      \
+    break;
+
+    CALL_WRAPPER(1)
+    CALL_WRAPPER(2)
+    CALL_WRAPPER(4)
+    CALL_WRAPPER(8)
+    CALL_WRAPPER(16)
+    CALL_WRAPPER(32)
+    CALL_WRAPPER(64)
+#undef CALL_WRAPPER
+    default:
+      NVTE_CHECK(false,
+                 "num_tensors_to_process unsupported value, add to the CALL_WRAPPER macro for your "
+                 "workload: ",
+                 num_tensors_to_process);
+      break;
+  }
 }
 
 }  // namespace transformer_engine

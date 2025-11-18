@@ -297,7 +297,7 @@ if __name__ == "__main__":
     if jagged_input_splits is not None:
         num_gemms_list = [len(jagged_input_splits)]
 
-    token_dim_list = [65536, 98304]
+    token_dim_list = [16384, 32768, 65536, 98304]
     hidden_dim_list = [7168]
     output_dim_list = [2048]
 

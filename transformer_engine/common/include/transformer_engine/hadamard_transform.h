@@ -79,7 +79,6 @@ void nvte_multi_hadamard_transform_cast_fusion_columnwise(
     const int* split_sections, const size_t num_tensors, const NVTEQuantizationConfig quant_config,
     cudaStream_t stream);
 
-
 /*!
  * \brief Perform multi-tensor Hadamard transform absolute maximum reduction (amax) with optional randomized Hadamard transform.
  *

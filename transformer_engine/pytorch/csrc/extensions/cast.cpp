@@ -292,23 +292,23 @@ void multi_tensor_quantize_nvfp4_impl(const TensorWrapper &input,
             colwise_data_shape_2d.push_back(last_dim);
 
             out_transpose.set_rowwise_data(out_columnwise_data.data_ptr,
-                                          static_cast<DType>(out_columnwise_data.dtype),
-                                          colwise_data_shape_2d);
+                                           static_cast<DType>(out_columnwise_data.dtype),
+                                           colwise_data_shape_2d);
             out_transpose.set_rowwise_scale_inv(out_columnwise_scale_inv.data_ptr,
                                                 static_cast<DType>(out_columnwise_scale_inv.dtype),
                                                 out_columnwise_scale_inv.shape);
             out_transpose.set_amax(out_columnwise_amax.data_ptr,
-                                  static_cast<DType>(out_columnwise_amax.dtype),
-                                  out_columnwise_amax.shape);
+                                   static_cast<DType>(out_columnwise_amax.dtype),
+                                   out_columnwise_amax.shape);
           }
           out_transpose_list.emplace_back(std::move(out_transpose));
           nvte_tensor_out_transpose_list.push_back(out_transpose_list.back().data());
         }
         // call the grouped kernel
         nvte_multi_hadamard_transform_cast_fusion_columnwise(
-          input.data(), reinterpret_cast<NVTETensor *>(nvte_tensor_out_transpose_list.data()),
-          rht_matrix_nvte.data(), split_sections.data(), num_tensors, quant_config_list[0],
-          stream);
+            input.data(), reinterpret_cast<NVTETensor *>(nvte_tensor_out_transpose_list.data()),
+            rht_matrix_nvte.data(), split_sections.data(), num_tensors, quant_config_list[0],
+            stream);
       }
     });
   } else {
