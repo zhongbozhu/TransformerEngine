@@ -170,7 +170,7 @@ template <class MShape, class NShape, class KShape, class ClusterTileShape,
           bool kEnableStochasticRounding = false>
 __global__ static
 void
-multi_rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_tile,
+group_rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_tile,
             TA const* A, AStride dA, ASmemLayout sAlayout, CUTE_GRID_CONSTANT TmaLoadA const tma_load_a,
             TB const* B, BStride dB, BSmemLayout sBlayout, CUTE_GRID_CONSTANT TmaLoadB const tma_load_b,
             CSmemLayout,
@@ -707,7 +707,7 @@ multi_rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_til
 // SFC: m x (n/16): row-major
 template <typename TA, typename TB, typename TC, typename TSFC, int kNumTensorsPow2, bool kEnableStochasticRounding = false>
 void
-multi_rht_gemm_ntt_w_sfc(int m, int n,
+group_rht_gemm_ntt_w_sfc(int m, int n,
         TA const* A,
         TB const* B,
         MultiAmaxHadamardCastFusionArgs* kernel_args_ptr,
@@ -811,7 +811,7 @@ multi_rht_gemm_ntt_w_sfc(int m, int n,
   dim3 dimGrid(tiles, 1, 1);
 
   int smem_size = sizeof(SharedStorage<TA, TB, decltype(sA), decltype(sB)>);
-  auto* kernel_ptr = &multi_rht_gemm_device<
+  auto* kernel_ptr = &group_rht_gemm_device<
                                   decltype(M), decltype(N), decltype(k_tile_size), decltype(cga_tile_shape),
                                   TA, decltype(dA), decltype(sA), decltype(tma_load_a),
                                   TB, decltype(dB), decltype(sB), decltype(tma_load_b),
@@ -839,11 +839,11 @@ multi_rht_gemm_ntt_w_sfc(int m, int n,
        rng_state);
 }
 
-// this function is used to wrap the multi_rht_gemm_ntt_w_sfc function
+// this function is used to wrap the group_rht_gemm_ntt_w_sfc function
 // to transpose the input tensor A
 template <typename TA, typename TB, typename TC, typename TSFC, int kNumTensorsPow2, bool kEnableStochasticRounding = false>
 void
-multi_rht_gemm_ttt_wrapper(int m, int n,
+group_rht_gemm_ttt_wrapper(int m, int n,
         TA const* A,
         TB const* B,
         MultiAmaxHadamardCastFusionArgs* kernel_args_ptr,
@@ -862,7 +862,7 @@ multi_rht_gemm_ttt_wrapper(int m, int n,
   // B: 16 x 16: row-major
   // C: n x m: row-major
   // SFC: n x (m/16): row-major
-  multi_rht_gemm_ntt_w_sfc<TA, TB, TC, TSFC, kNumTensorsPow2, kEnableStochasticRounding>(
+  group_rht_gemm_ntt_w_sfc<TA, TB, TC, TSFC, kNumTensorsPow2, kEnableStochasticRounding>(
     n, m,
     A, B,
     kernel_args_ptr,
@@ -876,13 +876,13 @@ multi_rht_gemm_ttt_wrapper(int m, int n,
 
 // clang-format on
 
-void multi_hadamard_transform_cast_fusion_columnwise(const Tensor &input_,
+void group_hadamard_transform_cast_fusion_columnwise(const Tensor &input_,
                                                      std::vector<Tensor *> &output_list,
                                                      const int *split_sections, size_t num_tensors,
                                                      const Tensor &hadamard_matrix_,
                                                      QuantizationConfig &quant_config,
                                                      cudaStream_t stream) {
-  NVTE_API_CALL(multi_hadamard_transform_cast_fusion_columnwise);
+  NVTE_API_CALL(group_hadamard_transform_cast_fusion_columnwise);
 
   using transformer_engine::detail::kMaxTensorsPerKernel;
   using transformer_engine::detail::MultiAmaxHadamardCastFusionArgs;
@@ -1015,7 +1015,7 @@ void multi_hadamard_transform_cast_fusion_columnwise(const Tensor &input_,
   case kNumTensorsPow2:                                                                       \
     TRANSFORMER_ENGINE_SWITCH_CONDITION(                                                      \
         use_stochastic_rounding, kUseStochasticRounding,                                      \
-        detail::multi_rht_gemm_ttt_wrapper<TA, TB, TC, TSFC, kNumTensorsPow2,                 \
+        detail::group_rht_gemm_ttt_wrapper<TA, TB, TC, TSFC, kNumTensorsPow2,                 \
                                            kUseStochasticRounding>(                           \
             /*m=*/m, /*n=*/n, /*A=*/reinterpret_cast<TA const *>(input.dptr),                 \
             /*B=*/reinterpret_cast<TB const *>(hadamard_matrix.dptr),                         \
@@ -1042,7 +1042,7 @@ void multi_hadamard_transform_cast_fusion_columnwise(const Tensor &input_,
 
 }  // namespace transformer_engine
 
-void nvte_multi_hadamard_transform_cast_fusion_columnwise(
+void nvte_group_hadamard_transform_cast_fusion_columnwise(
     const NVTETensor input, NVTETensor *outputs, const NVTETensor hadamard_matrix,
     const int *split_sections, const size_t num_tensors, const NVTEQuantizationConfig quant_config,
     cudaStream_t stream) {
@@ -1062,7 +1062,7 @@ void nvte_multi_hadamard_transform_cast_fusion_columnwise(
   }
 
   // Call the multi-tensor Hadamard transform amax implementation.
-  multi_hadamard_transform_cast_fusion_columnwise(
+  group_hadamard_transform_cast_fusion_columnwise(
       *input_tensor, output_list, split_sections, num_tensors,
       *convertNVTETensorCheck(hadamard_matrix), quant_config_cpp, stream);
 }

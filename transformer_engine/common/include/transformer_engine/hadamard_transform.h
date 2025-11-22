@@ -74,7 +74,7 @@ void nvte_hadamard_transform_cast_fusion_columnwise(const NVTETensor input, NVTE
  *  \param[in]      quant_config      Quantization configuration.
  *  \param[in]      stream            CUDA stream used for the operation.
  */
-void nvte_multi_hadamard_transform_cast_fusion_columnwise(
+void nvte_group_hadamard_transform_cast_fusion_columnwise(
     const NVTETensor input, NVTETensor* outputs, const NVTETensor hadamard_matrix,
     const int* split_sections, const size_t num_tensors, const NVTEQuantizationConfig quant_config,
     cudaStream_t stream);
@@ -92,7 +92,7 @@ void nvte_multi_hadamard_transform_cast_fusion_columnwise(
  *  \param[in]      random_sign_mask_t   16-bit (int) sign mask for transform (transposed).
  *  \param[in]      stream               CUDA stream used for the operation.
  */
-void nvte_multi_hadamard_transform_amax(const NVTETensor input, NVTETensor* outputs,
+void nvte_group_hadamard_transform_amax(const NVTETensor input, NVTETensor* outputs,
                                         const int* split_sections, const size_t num_tensors,
                                         int random_sign_mask, int random_sign_mask_t,
                                         cudaStream_t stream);
@@ -108,7 +108,7 @@ void nvte_multi_hadamard_transform_amax(const NVTETensor input, NVTETensor* outp
  *  \param[in]      num_tensors     Number of output tensors, must be > 0.
  *  \param[in]      stream          CUDA stream used for the operation.
  */
-void nvte_multi_tensor_amax(const NVTETensor input, NVTETensor* outputs, const int* split_sections,
+void nvte_group_tensor_amax(const NVTETensor input, NVTETensor* outputs, const int* split_sections,
                             const size_t num_tensors, cudaStream_t stream);
 
 #ifdef __cplusplus
