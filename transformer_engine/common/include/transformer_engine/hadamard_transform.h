@@ -62,9 +62,9 @@ void nvte_hadamard_transform_cast_fusion_columnwise(const NVTETensor input, NVTE
                                                     cudaStream_t stream);
 
 /*!
- * \brief Perform the multi-tensor columnwise Hadamard transform cast fusion operation.
+ * \brief Perform the grouped-tensor columnwise Hadamard transform cast fusion operation.
  *
- *  This function is experimental and the API is not stable.
+ *  This function is experimental and the API is not stable. Group_ prefix means contiguous input concatenated
  *
  *  \param[in]      input             Input tensor to apply Hadamard transform.
  *  \param[in,out]  outputs           Array of output tensors.
@@ -80,9 +80,9 @@ void nvte_group_hadamard_transform_cast_fusion_columnwise(
     cudaStream_t stream);
 
 /*!
- * \brief Perform multi-tensor Hadamard transform absolute maximum reduction (amax) with optional randomized Hadamard transform.
+ * \brief Perform grouped-tensor Hadamard transform absolute maximum reduction (amax) with optional randomized Hadamard transform.
  *
- *  This function is experimental and the API is not stable.
+ *  This function is experimental and the API is not stable. Group_ prefix means contiguous input concatenated
  *
  *  \param[in]      input                Input tensor to apply Hadamard transform, assumed contiguous in memory and split on dimension 0.
  *  \param[in,out]  outputs              Array of output tensors.
@@ -96,20 +96,6 @@ void nvte_group_hadamard_transform_amax(const NVTETensor input, NVTETensor* outp
                                         const int* split_sections, const size_t num_tensors,
                                         int random_sign_mask, int random_sign_mask_t,
                                         cudaStream_t stream);
-
-/*!
- * \brief Perform multi-tensor absolute maximum reduction (amax) without Hadamard transform.
- *
- *  This function is experimental and the API is not stable.
- *
- *  \param[in]      input           Input tensor, assumed contiguous in memory and split on dimension 0.
- *  \param[in,out]  outputs         Array of output tensors.
- *  \param[in]      split_sections  Array specifying splits in dimension 0 for each output tensor.
- *  \param[in]      num_tensors     Number of output tensors, must be > 0.
- *  \param[in]      stream          CUDA stream used for the operation.
- */
-void nvte_group_tensor_amax(const NVTETensor input, NVTETensor* outputs, const int* split_sections,
-                            const size_t num_tensors, cudaStream_t stream);
 
 #ifdef __cplusplus
 }  // extern "C"
