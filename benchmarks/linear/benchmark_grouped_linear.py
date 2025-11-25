@@ -173,7 +173,9 @@ def benchmark_linear(
     return timing_ms
 
 
-def run_benchmark_linear(mkns, recipe_name, use_bias, num_gemms=4, m_splits_provided=None):
+def run_benchmark_linear(
+    mkns, recipe_name, use_bias, num_gemms=4, m_splits_provided=None, fwd_only=False
+):
     data = []
     assert not use_bias, "Bias is not supported for GroupedLinear benchmark"
 
@@ -190,6 +192,7 @@ def run_benchmark_linear(mkns, recipe_name, use_bias, num_gemms=4, m_splits_prov
         # Run the benchmark
         print(f"fwd_m={m}, fwd_k={k}, fwd_n={n}")
         print(f"m_splits: {m_splits}")
+        print(f"fwd_only: {fwd_only}")
 
         grouped_fwd_bwd_timing_ms = benchmark_linear(
             x,
@@ -197,7 +200,7 @@ def run_benchmark_linear(mkns, recipe_name, use_bias, num_gemms=4, m_splits_prov
             m_splits,
             bias,
             recipe_name,
-            mode="fwd_bwd",
+            mode="fwd_only" if fwd_only else "fwd_bwd",
             num_gemms=num_gemms,
         )
 
@@ -213,6 +216,8 @@ def run_benchmark_linear(mkns, recipe_name, use_bias, num_gemms=4, m_splits_prov
             ]
         )
 
+    timing_notation = "grouped_fwd_time_ms" if fwd_only else "grouped_fwd_bwd_time_ms"
+
     df = pd.DataFrame(
         data=data,
         columns=[
@@ -221,7 +226,7 @@ def run_benchmark_linear(mkns, recipe_name, use_bias, num_gemms=4, m_splits_prov
             "n",
             "recipe",
             "num_gemms",
-            "grouped_fwd_bwd_time_ms",
+            timing_notation,
         ],
     )
 
@@ -265,6 +270,12 @@ if __name__ == "__main__":
         type=int,
         default=2048,
         help="Output dimension to use, default is 2048",
+    )
+    parser.add_argument(
+        "--fwd-only",
+        action="store_true",
+        default=False,
+        help="Run forward pass only, default is both forward and backward passes",
     )
     args = parser.parse_args()
 
@@ -372,6 +383,7 @@ if __name__ == "__main__":
                 use_bias,
                 num_gemms=num_gemms,
                 m_splits_provided=jagged_input_splits,
+                fwd_only=args.fwd_only,
             )
             df_linears = pd.concat([df_linears, df])
 

@@ -238,30 +238,32 @@ void multi_tensor_quantize_nvfp4_impl(const TensorWrapper &input,
     NVTE_SCOPED_GIL_RELEASE({
       // rowwise quantization not yet fused
       if (quantizer->rowwise_usage) {
+        std::vector<TensorWrapper> out_identity_list;
+        std::vector<NVTETensor> nvte_tensor_out_identity_list;
         for (size_t i = 0; i < num_tensors; i++) {
           // skip this round if input is empty
-          if (input_list[i].numel() == 0) {
-            continue;
-          }
+          bool is_empty_split = input_list[i].numel() == 0;
           TensorWrapper out_identity(output_list[i].scaling_mode());
           auto out_identity_data = output_list[i].get_rowwise_data();
           auto out_identity_scale_inv = output_list[i].get_rowwise_scale_inv();
           auto out_identity_amax = output_list[i].get_amax();
-          out_identity.set_rowwise_data(out_identity_data.data_ptr,
-                                        static_cast<DType>(out_identity_data.dtype),
-                                        out_identity_data.shape);
-          out_identity.set_rowwise_scale_inv(out_identity_scale_inv.data_ptr,
-                                             static_cast<DType>(out_identity_scale_inv.dtype),
-                                             out_identity_scale_inv.shape);
-          out_identity.set_amax(out_identity_amax.data_ptr,
-                                static_cast<DType>(out_identity_amax.dtype),
-                                out_identity_amax.shape);
-
-          NVTE_SCOPED_GIL_RELEASE({
-            nvte_quantize_v2(input_list[i].data(), out_identity.data(), quant_config_list[i],
-                             stream);
-          });
+          if (!is_empty_split) {
+            out_identity.set_rowwise_data(out_identity_data.data_ptr,
+                                          static_cast<DType>(out_identity_data.dtype),
+                                          out_identity_data.shape);
+            out_identity.set_rowwise_scale_inv(out_identity_scale_inv.data_ptr,
+                                               static_cast<DType>(out_identity_scale_inv.dtype),
+                                               out_identity_scale_inv.shape);
+            out_identity.set_amax(out_identity_amax.data_ptr,
+                                  static_cast<DType>(out_identity_amax.dtype),
+                                  out_identity_amax.shape);
+          }
+          out_identity_list.emplace_back(std::move(out_identity));
+          nvte_tensor_out_identity_list.push_back(out_identity_list.back().data());
         }
+        nvte_group_nvfp4_quantize_with_amax(input.data(), nvte_tensor_out_identity_list.data(),
+                                            split_sections.data(), num_tensors,
+                                            quant_config_list[0], stream);
       }
       // columnwise RHT quantization fusion with grouped version
       if (quantizer->columnwise_usage) {
