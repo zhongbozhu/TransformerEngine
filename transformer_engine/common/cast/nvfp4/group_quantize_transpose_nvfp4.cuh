@@ -38,6 +38,8 @@ constexpr int kMaxTensorsPerKernel = 64;  // Args must be <4 KB, expand 64 if ne
 struct MultiAmaxCastTransposeFusionArgs {
   // Amax buffer for rowwise scaling
   void *rowwise_amax_list[kMaxTensorsPerKernel];
+  // Rowwise scale pointers with 128x4 padding included for rowwise scaling
+  void *output_rowwise_scale_inv_list[kMaxTensorsPerKernel];
   // (Unused for rowwise only scaling) Amax buffer for colwise scaling
   void *colwise_amax_list[kMaxTensorsPerKernel];
   // (Unused for rowwise only scaling) output data pointers for fp4 transposed output
@@ -46,8 +48,6 @@ struct MultiAmaxCastTransposeFusionArgs {
   void *output_colwise_scale_inv_list[kMaxTensorsPerKernel];
   // (Unused for rowwise only scaling) output scale stride for colwise scaling
   int output_colwise_scale_stride[kMaxTensorsPerKernel];
-  // split sections of each tensor of input
-  int split_sections[kMaxTensorsPerKernel];
   // Prefix sum (with leading zero) of split_sections of each tensor of input
   int split_sections_range[kMaxTensorsPerKernel + 1];
   // Number of tensors (splits) being processed by kernel
@@ -62,6 +62,26 @@ __device__ __forceinline__ int GetTensorId(MultiAmaxCastTransposeFusionArgs *ker
     ++tensor_id;
   }
   return tensor_id;
+}
+
+// Helper to get tensor id at offset, and also whether [offset_start, offset_end) crosses a split boundary.
+__device__ __forceinline__ int GetTensorIdAndBoundary(
+    MultiAmaxCastTransposeFusionArgs *kernel_args_ptr, int offset_start, int offset_end,
+    bool *cross_boundary) {
+  int tensor_id_start = 0;
+  while (kernel_args_ptr->split_sections_range[tensor_id_start + 1] <= offset_start) {
+    ++tensor_id_start;
+  }
+  int tensor_id_end = tensor_id_start;
+  if (offset_end != offset_start) {
+    if (kernel_args_ptr->split_sections_range[tensor_id_start + 1] < offset_end) {
+      tensor_id_end = tensor_id_start + 1;
+    }
+  }
+  if (cross_boundary) {
+    *cross_boundary = (tensor_id_start != tensor_id_end);
+  }
+  return tensor_id_start;
 }
 
 __device__ __forceinline__ void UpdateEncodeDecodeScaleFP32(float *amax_ptr, float *s_enc_ptr,
@@ -266,10 +286,17 @@ __global__ void __launch_bounds__(THREADS_NUM)
   // TODO (zhongbo): finish this
   float *amax_rowwise_ptr = nullptr;
   float *amax_colwise_ptr = nullptr;
+  nvfp4_scale_t *split_rowwise_scale_ptr = nullptr;
 
   // suppose the amax is fixed for the current 128x128 tile (need 128 padding)
-  int tensor_id = GetTensorId(&kernel_args, block_offset_Y);
+  bool need_update_tensor_id = true;
+  int tensor_id = GetTensorIdAndBoundary(&kernel_args, block_offset_Y, block_offset_Y + CHUNK_DIM_Y,
+                                         &need_update_tensor_id);
+  size_t split_start = kernel_args.split_sections_range[tensor_id];
+  size_t split_end = kernel_args.split_sections_range[tensor_id + 1];
   amax_rowwise_ptr = reinterpret_cast<float *>(kernel_args.rowwise_amax_list[tensor_id]);
+  split_rowwise_scale_ptr =
+      reinterpret_cast<nvfp4_scale_t *>(kernel_args.output_rowwise_scale_inv_list[tensor_id]);
 
   float S_enc_rowwise = 1.0f;
   float S_dec_rowwise = 1.0f;
@@ -305,6 +332,23 @@ __global__ void __launch_bounds__(THREADS_NUM)
     const size_t buff_offset_in = buff * BUFF_IN_SIZE;
     const size_t buff_offset_out = buff * BUFF_OUT_SIZE;
     const size_t buff_offset_out_t = buff * BUFF_OUT_T_SIZE;
+
+    // for stages from 1 to STAGES - 1, we need to update the tensor id
+    // skip updating tensor id if it's the last CTA, and some stages will be out of bounds
+    if (need_update_tensor_id && stage > 0 && (block_offset_Y + stage_offset_Y < rows)) {
+      int new_tensor_id = GetTensorId(&kernel_args, block_offset_Y + stage_offset_Y);
+      if (new_tensor_id != tensor_id) {
+        tensor_id = new_tensor_id;
+        split_start = kernel_args.split_sections_range[tensor_id];
+        split_end = kernel_args.split_sections_range[tensor_id + 1];
+        amax_rowwise_ptr = reinterpret_cast<float *>(kernel_args.rowwise_amax_list[tensor_id]);
+        UpdateEncodeDecodeScaleFP32(amax_rowwise_ptr, &S_enc_rowwise, &S_dec_rowwise);
+        split_rowwise_scale_ptr =
+            reinterpret_cast<nvfp4_scale_t *>(kernel_args.output_rowwise_scale_inv_list[tensor_id]);
+        // TODO (zhongbo): colwise scaling disabled for now because of transpose
+        // Skip fetching colwise amax pointer and scaling factor updates
+      }
+    }
 
     if (next_stage < STAGES) {
       // Wait for TMA transfer to have finished reading shared memory.
@@ -567,13 +611,29 @@ __global__ void __launch_bounds__(THREADS_NUM)
         const size_t scales_offset_Y =
             scales_offset_Y_rowwise + stage * BUFF_DIM_Y + it * THREADS_Y_ROWWISE;
         const size_t scales_offset_X = scales_offset_X_rowwise;
-        const size_t scale_idx_global = scales_offset_Y * scale_stride + scales_offset_X;
 
-        // const bool rowwise_scale_is_within_bounds_Y = scales_offset_Y < rows;
         const bool rowwise_scale_is_within_bounds_Y =
-            (stage_rowwise_scales_offset_Y + it * THREADS_Y_ROWWISE + tid_Y_rowwise) < chunk_rows;
-        if (rowwise_scale_is_within_bounds_X && rowwise_scale_is_within_bounds_Y) {
-          scales_ptr[scale_idx_global] = S_dec_b_fp8;
+            (stage_rowwise_scales_offset_Y + it * THREADS_Y_ROWWISE) < chunk_rows;
+
+        // TODO(zhongbo): depending on input padding multiple (whether 128 or 64), use either scale_ptr or split_rowwise_scale_ptr
+        // const size_t scale_idx_global = scales_offset_Y * scale_stride + scales_offset_X;
+        // if (rowwise_scale_is_within_bounds_X && rowwise_scale_is_within_bounds_Y) {
+        //   scales_ptr[scale_idx_global] = S_dec_b_fp8;
+        // }
+
+        // Map to local split coordinates
+        const size_t split_rows = split_end - split_start;
+        const size_t local_scale_row = scales_offset_Y - split_start;
+
+        // Local bounds: 0 <= local_scale_row < split_rows
+        const bool local_rowwise_scale_is_within_bounds_Y = local_scale_row < split_rows;
+
+        // Index inside this split’s scale buffer
+        const size_t scale_idx_local = local_scale_row * scale_stride + scales_offset_X;
+
+        if (rowwise_scale_is_within_bounds_X && rowwise_scale_is_within_bounds_Y &&
+            local_rowwise_scale_is_within_bounds_Y) {
+          split_rowwise_scale_ptr[scale_idx_local] = S_dec_b_fp8;
         }
 
         // Compute "correct" per-block encoding scaling factor
@@ -741,7 +801,9 @@ void group_quantize_transpose(const Tensor &input, const Tensor *noop,
     }
     kernel_args.rowwise_amax_list[kernel_args.num_tensors] =
         reinterpret_cast<void *>(output_list[i]->amax.dptr);
-    kernel_args.split_sections[kernel_args.num_tensors] = split_sections[i];
+    kernel_args.output_rowwise_scale_inv_list[kernel_args.num_tensors] =
+        reinterpret_cast<void *>(output_list[i]->scale_inv.dptr);
+    // kernel_args.split_sections[kernel_args.num_tensors] = split_sections[i];
     kernel_args.split_sections_range[kernel_args.num_tensors + 1] =
         kernel_args.split_sections_range[kernel_args.num_tensors] + split_sections[i];
     // check overflow

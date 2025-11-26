@@ -184,7 +184,7 @@ def run_benchmark_linear(
         device = "cuda"
         x = torch.randn((m, k), dtype=torch.bfloat16, device=device, requires_grad=True)
         ws = [torch.randn((n, k), dtype=torch.bfloat16, device=device) for _ in range(num_gemms)]
-        assert m % num_gemms == 0
+
         m_splits = [m // num_gemms] * num_gemms if m_splits_provided is None else m_splits_provided
         # Bias is not supported for GroupedLinear benchmark
         bias = None
