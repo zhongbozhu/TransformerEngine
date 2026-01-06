@@ -22,7 +22,7 @@ def install_requirements() -> List[str]:
         "packaging",
         "pydantic",
         "nvdlfw-inspect",
-        "triton",
+        "pytorch-triton",
     ]
 
 
