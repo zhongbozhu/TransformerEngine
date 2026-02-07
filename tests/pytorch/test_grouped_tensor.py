@@ -448,7 +448,7 @@ class TestGroupedTensor:
         )
 
         # Quantize using grouped API (handle both 2-arg and 3-arg bindings)
-        _ = tex.quantize_grouped(grouped_input, grouped_output)
+        _ = tex.quantize_grouped(grouped_input, grouped_output, quantizers[0])
         # Build expected output by quantizing each tensor independently
         expected_data = []
         expected_scale_inv = []

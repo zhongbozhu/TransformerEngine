@@ -329,8 +329,8 @@ class GroupedTensor:
         first_dims_list = [s[0] for s in shape]
         last_dims_list = [s[1] for s in shape]
 
-        all_same_first = len(set(first_dims_list)) == 1
-        all_same_last = len(set(last_dims_list)) == 1
+        all_same_first = False
+        all_same_last = True
 
         # Create dimension arrays if needed
         first_dims = (
@@ -353,9 +353,12 @@ class GroupedTensor:
             # Kernels need to calculate precise pointers based on size of elements.
             numels = [s[0] * s[1] for s in shape]
             offsets = [0]
-            for i in range(num_tensors - 1):
+            for i in range(num_tensors):
                 offsets.append(offsets[-1] + numels[i])
             tensor_offsets = torch.tensor(offsets, dtype=torch.int64, device=device)
+
+        # print(f"offsets: {offsets}")
+        # print(f"tensor_offsets: {tensor_offsets}")
 
         # Calculate logical shape based on shape pattern
         if all_same_first and all_same_last:
