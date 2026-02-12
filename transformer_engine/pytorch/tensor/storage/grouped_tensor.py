@@ -616,6 +616,8 @@ class GroupedTensor:
         If quantizer.internal is True, returns QuantizedTensorStorage.
         Otherwise, returns QuantizedTensor.
 
+        This API is NOT graph safe, but can be used for testing & debugging.
+
         TODO(ksivaman): Block cases where any dims are varying. This is needed only
         to expose the weights as separate parameters.
         """
@@ -624,7 +626,26 @@ class GroupedTensor:
 
         no_quantization = self.quantizer is None
 
-        assert self.shape is not None, "Shape must be set for splitting a GroupedTensor."
+        # if self.shape is None, then trigger D2H copy and get the shape (not graph safe)
+        if self.shape is None:
+            first_dims_list = (
+                [self.logical_shape[0]] * self.num_tensors
+                if self.first_dims is None
+                else self.first_dims.tolist()
+            )
+            last_dims_list = (
+                [self.logical_shape[1]] * self.num_tensors
+                if self.last_dims is None
+                else self.last_dims.tolist()
+            )
+            shape_list = []
+            for i in range(self.num_tensors):
+                shape_list.append((first_dims_list[i], last_dims_list[i]))
+            self.shape = shape_list
+
+        # edge case: handle the case where tensor_offsets is given but offsets is not set
+        if self.offsets is None and self.tensor_offsets is not None:
+            self.offsets = self.tensor_offsets.tolist()
 
         # Case 1: No quantization - return regular torch tensors
         if no_quantization:
@@ -669,6 +690,18 @@ class GroupedTensor:
 
         # Case 2: Quantized tensors
         recipe = self.quantizer._get_compatible_recipe()
+
+        # populate scale_inv_offsets from the tensor offsets
+        if self.scale_inv is not None and self.scale_inv_offsets is None:
+            if recipe.nvfp4():
+                self.scale_inv_offsets = self.tensor_offsets // 16
+            if recipe.mxfp8():
+                self.scale_inv_offsets = self.tensor_offsets // 32
+        if self.columnwise_scale_inv is not None and self.columnwise_scale_inv_offsets is None:
+            if recipe.nvfp4():
+                self.columnwise_scale_inv_offsets = self.tensor_offsets // 16
+            if recipe.mxfp8():
+                self.columnwise_scale_inv_offsets = self.tensor_offsets // 32
 
         for i in range(self.num_tensors):
             # Get tensor shape
