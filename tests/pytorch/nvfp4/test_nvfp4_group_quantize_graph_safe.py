@@ -371,7 +371,7 @@ def check_grouped_tensor_nvfp4_with_paged_stashing(
     "M, N",
     [
         # edge case, zero tokens for all
-        # (0, 512),
+        (0, 512),
         # full tile cases
         (1024, 256),
         # larger sizes
@@ -398,29 +398,6 @@ def check_grouped_tensor_nvfp4_with_paged_stashing(
     "with_random_sign_mask", [True, False], ids=["with_random_sign_mask", "no_random_sign_mask"]
 )
 @pytest.mark.parametrize("with_rht", [True], ids=["with_rht"])
-# TODO: fix the zero token case for whole rank
-# @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
-# @pytest.mark.parametrize(
-#     "M, N",
-#     [
-#         # edge case, zero tokens for all
-#         (0, 512),
-#     ],
-# )
-# @pytest.mark.parametrize("x_dtype", [torch.bfloat16], ids=str)
-# @pytest.mark.parametrize(
-#     "edge_cases",
-#     [
-#         "regular",
-#     ],
-# )
-# @pytest.mark.parametrize(
-#     "quantize_mode", ["quantize_transpose"]
-# )
-# @pytest.mark.parametrize(
-#     "with_random_sign_mask", [True], ids=["with_random_sign_mask"]
-# )
-# @pytest.mark.parametrize("with_rht", [True], ids=["with_rht"])
 def test_grouped_tensor_nvfp4_versus_reference(
     x_dtype: torch.dtype,
     M: int,

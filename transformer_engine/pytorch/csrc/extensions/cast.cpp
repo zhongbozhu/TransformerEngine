@@ -171,6 +171,8 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
   const auto logical_first_dim = logical_shape[0];
   const auto logical_last_dim = logical_shape[1];
 
+  bool empty_input_buffer = logical_first_dim == 0 || logical_last_dim == 0;
+
   auto quantizer_cpp = convert_quantizer(quantizer);
 
   // Create input GroupedTensor.
@@ -196,6 +198,13 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
     grouped_quantization_mode = GroupedQuantizationMode::MXFP8_GROUPED_QUANTIZE;
   } else if (detail::IsNVFP4Quantizers(quantizer.ptr())) {
     grouped_quantization_mode = GroupedQuantizationMode::NVFP4_GROUPED_QUANTIZE;
+  }
+
+  if (empty_input_buffer) {
+    // early return for empty input buffer
+    // just return the output tensor as is
+    // no need to quantize
+    return py::reinterpret_borrow<py::object>(grouped_output_py);
   }
 
   switch (grouped_quantization_mode) {
