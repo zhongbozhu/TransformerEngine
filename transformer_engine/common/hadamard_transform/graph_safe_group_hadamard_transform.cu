@@ -251,6 +251,11 @@ __global__ void GraphSafeGroupHadamardAmaxTmaKernel(
 
   // calculate the global offset to get tensor id
   size_t global_offset = blockIdx.y * CHUNK_DIM_Y * last_logical_dim;
+  // paged stashing: will have input buffer [M, N], where M is larger than sum(first_dims)
+  // also need to early return if this CTA is processing a region larger than the last offsets[num_tensors]
+  if (global_offset >= offsets_ptr[num_tensors]) {
+    return;
+  }
   int tensor_id = get_current_tensor_id(shape_rep, num_tensors, global_offset, first_logical_dim,
                                         last_logical_dim, offsets_ptr);
   output_pre_rht_amax_ptr = static_cast<float*>(amax_rowwise_ptr) + tensor_id;

@@ -880,10 +880,12 @@ class GroupedTensor:
 
                 if self.scale_inv is not None and self.scale_inv_offsets is not None:
                     scale_start = self.scale_inv_offsets[i]
-                    if i < self.num_tensors - 1:
-                        scale_end = self.scale_inv_offsets[i + 1]
-                    else:
-                        scale_end = self.scale_inv.numel()
+                    # if i < self.num_tensors - 1:
+                    #     scale_end = self.scale_inv_offsets[i + 1]
+                    # else:
+                    #     scale_end = self.scale_inv.numel()
+                    # for paged stashing, scale_inv should depend on the split offsets
+                    scale_end = self.scale_inv_offsets[i + 1]
 
                     # Get scale shape from quantizer
                     scale_shape = self.quantizer.get_scale_shape(tensor_shape, False)
@@ -894,10 +896,12 @@ class GroupedTensor:
                     and self.columnwise_scale_inv_offsets is not None
                 ):
                     cscale_start = self.columnwise_scale_inv_offsets[i]
-                    if i < self.num_tensors - 1:
-                        cscale_end = self.columnwise_scale_inv_offsets[i + 1]
-                    else:
-                        cscale_end = self.columnwise_scale_inv.numel()
+                    # if i < self.num_tensors - 1:
+                    #     cscale_end = self.columnwise_scale_inv_offsets[i + 1]
+                    # else:
+                    #     cscale_end = self.columnwise_scale_inv.numel()
+                    # for paged stashing, columnwise_scale_inv should depend on the split offsets
+                    cscale_end = self.columnwise_scale_inv_offsets[i + 1]
 
                     # Get columnwise scale shape from quantizer
                     cscale_shape = self.quantizer.get_scale_shape(tensor_shape, True)

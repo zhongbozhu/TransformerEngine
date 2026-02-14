@@ -53,6 +53,8 @@ def generate_split_sections(M: int, N: int, edge_cases: str) -> list[int]:
         return [0] * num_chunks
     if edge_cases == "regular":
         split_sections = [avg_split] * num_chunks
+    elif edge_cases == "zero_tokens_all":
+        split_sections = [0] * num_chunks
     elif edge_cases == "zero_tokens_front":
         split_sections = [0] + [avg_split] * (num_chunks - 2) + [avg_split * 2]
     elif edge_cases == "zero_tokens_end":
@@ -248,6 +250,122 @@ def check_grouped_tensor_nvfp4_versus_reference(
                 torch.testing.assert_close(x_sx_t_valid, x_sx_t_ref_valid, atol=0.0, rtol=0.0)
 
 
+def check_grouped_tensor_nvfp4_with_paged_stashing(
+    x_dtype: torch.dtype,
+    M: int,
+    N: int,
+    return_identity: bool,
+    return_transpose: bool,
+    split_sections: list[int],
+    with_rht: bool = True,
+    with_post_rht_amax: bool = True,
+    with_random_sign_mask: bool = True,
+    valid_M: int = None,
+) -> None:
+
+    te_dtype = tex.DType.kFloat4E2M1
+
+    assert valid_M is not None, "valid_M must be provided when with_paged_stashing is True"
+    assert valid_M < M, "valid_M must be less than M when with_paged_stashing is True"
+
+    split_section_tensor = torch.tensor(split_sections, dtype=torch.int64, device="cuda")
+
+    # Setup device and random seed
+    device = "cuda"
+    seed = 0
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+
+    # Input (fill the entire tensor with garbage too)
+    x = torch.randn((M, N), dtype=x_dtype, device=device)
+    valid_x = x[:valid_M, :].clone()
+    num_chunks = len(split_sections)
+
+    x_splits = torch.split(valid_x, split_sections)
+
+    # Quantize
+    quantizers = [
+        NVFP4Quantizer(
+            fp4_dtype=te_dtype,
+            rowwise=return_identity,
+            columnwise=return_transpose,
+            with_amax_reduction=False,
+            amax_reduction_group=None,
+            with_rht=with_rht,
+            with_post_rht_amax=with_post_rht_amax,
+            with_random_sign_mask=with_random_sign_mask,
+        )
+        for _ in range(len(split_sections))
+    ]
+    x_qx_ref, x_sx_ref, x_amax_rowwise_ref, x_qx_t_ref, x_sx_t_ref, x_amax_colwise_ref = (
+        reference_group_quantize(
+            valid_x, quantizers, split_sections, return_identity, return_transpose
+        )
+    )
+
+    # Note: for grouped quantize with paged stashing
+    # it's expected that we can just pass in the regular input x, not the valid_x
+    # the kernel is expected to porcess it correctly by becoming no-op for cuda graph
+    group_quantized_output = fused_grouped_quantize(x, split_section_tensor, quantizers[0])
+
+    # print(f"group_quantized_output data shape: {group_quantized_output.data.shape if group_quantized_output.data is not None else None}")
+    # print(f"group_quantized_output scale_inv shape: {group_quantized_output.scale_inv.shape if group_quantized_output.scale_inv is not None else None}")
+    # print(f"group_quantized_output columnwise data shape: {group_quantized_output.columnwise_data.shape if group_quantized_output.columnwise_data is not None else None}")
+    # print(f"group_quantized_output columnwise scale shape: {group_quantized_output.columnwise_scale_inv.shape if group_quantized_output.columnwise_scale_inv is not None else None}")
+    # print(f"group_quantized_output amax shape: {group_quantized_output.amax.shape if group_quantized_output.amax is not None else None}")
+    # print(f"group_quantized_output columnwise amax shape: {group_quantized_output.columnwise_amax.shape if group_quantized_output.columnwise_amax is not None else None}")
+    # print(f"group_quantized_output first_dims: {group_quantized_output.first_dims if group_quantized_output.first_dims is not None else None}")
+    # print(f"group_quantized_output last_dims: {group_quantized_output.last_dims if group_quantized_output.last_dims is not None else None}")
+    # print(f"group_quantized_output tensor_offsets: {group_quantized_output.tensor_offsets if group_quantized_output.tensor_offsets is not None else None}")
+
+    # get a list of nvfp4 quantized tensors for testing
+    split_quantize_outputs = group_quantized_output.split_into_quantized_tensors()
+
+    if return_identity:
+        x_qx = [output._rowwise_data.view(dtype=torch.uint8) for output in split_quantize_outputs]
+        x_sx = [output._rowwise_scale_inv for output in split_quantize_outputs]
+        x_amax_rowwise = [output._amax_rowwise for output in split_quantize_outputs]
+
+        for i in range(len(x_qx)):
+            if split_sections[i] == 0:
+                # then just assert the same shape and dtype because the buffer won't be zero out
+                assert_same_shape_and_dtype(x_amax_rowwise[i], x_amax_rowwise_ref[i])
+                assert_same_shape_and_dtype(x_qx[i], x_qx_ref[i])
+                assert_same_shape_and_dtype(x_sx[i], x_sx_ref[i])
+            else:
+                torch.testing.assert_close(
+                    x_amax_rowwise[i], x_amax_rowwise_ref[i], atol=0.0, rtol=0.0
+                )
+                torch.testing.assert_close(x_qx[i], x_qx_ref[i], atol=0.0, rtol=0.0)
+                valid_scale_shape = get_nvfp4_scale_shape_no_padding(x_splits[i].shape, False)
+                x_sx_valid = x_sx[i][: valid_scale_shape[0], : valid_scale_shape[1]]
+                x_sx_ref_valid = x_sx_ref[i][: valid_scale_shape[0], : valid_scale_shape[1]]
+                torch.testing.assert_close(x_sx_valid, x_sx_ref_valid, atol=0.0, rtol=0.0)
+
+    if return_transpose:
+        x_qx_t = [
+            output._columnwise_data.view(dtype=torch.uint8) for output in split_quantize_outputs
+        ]
+        x_sx_t = [output._columnwise_scale_inv for output in split_quantize_outputs]
+        x_amax_colwise = [output._amax_columnwise for output in split_quantize_outputs]
+        # assert with zero tolerance
+        for i in range(len(x_qx_t)):
+            if split_sections[i] == 0:
+                # then just assert the same shape and dtype because the buffer won't be zero out
+                assert_same_shape_and_dtype(x_amax_colwise[i], x_amax_colwise_ref[i])
+                assert_same_shape_and_dtype(x_qx_t[i], x_qx_t_ref[i])
+                assert_same_shape_and_dtype(x_sx_t[i], x_sx_t_ref[i])
+            else:
+                torch.testing.assert_close(
+                    x_amax_colwise[i], x_amax_colwise_ref[i], atol=0.0, rtol=0.0
+                )
+                torch.testing.assert_close(x_qx_t[i], x_qx_t_ref[i], atol=0.0, rtol=0.0)
+                valid_scale_shape = get_nvfp4_scale_shape_no_padding(x_splits[i].shape, True)
+                x_sx_t_valid = x_sx_t[i][: valid_scale_shape[0], : valid_scale_shape[1]]
+                x_sx_t_ref_valid = x_sx_t_ref[i][: valid_scale_shape[0], : valid_scale_shape[1]]
+                torch.testing.assert_close(x_sx_t_valid, x_sx_t_ref_valid, atol=0.0, rtol=0.0)
+
+
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
 @pytest.mark.parametrize(
     "M, N",
@@ -340,4 +458,91 @@ def test_grouped_tensor_nvfp4_versus_reference(
         with_rht=with_rht,
         with_post_rht_amax=with_post_rht_amax,
         with_random_sign_mask=with_random_sign_mask,
+    )
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize(
+    "M, N",
+    [
+        # M won't be empty in paged stashing
+        # full tile cases
+        (1024, 256),
+        # larger sizes
+        (8192, 1024),
+        (16384, 8192),
+        (16384, 16384),
+    ],
+)
+@pytest.mark.parametrize("x_dtype", [torch.bfloat16], ids=str)
+@pytest.mark.parametrize(
+    "edge_cases",
+    [
+        "regular",
+        # even if buffer is not empty, but the token splits are all zero
+        "zero_tokens_all",
+        # partially zero tokens
+        "zero_tokens_front",
+        "zero_tokens_end",
+        "zero_tokens_middle",
+        "random_uneven_split",
+    ],
+)
+@pytest.mark.parametrize(
+    "quantize_mode", ["quantize", "quantize_transpose", "quantize_colwise_only"]
+)
+@pytest.mark.parametrize(
+    "with_random_sign_mask", [True, False], ids=["with_random_sign_mask", "no_random_sign_mask"]
+)
+@pytest.mark.parametrize("with_rht", [True], ids=["with_rht"])
+def test_grouped_tensor_nvfp4_with_paged_stashing(
+    x_dtype: torch.dtype,
+    M: int,
+    N: int,
+    edge_cases: str,
+    quantize_mode: str,
+    with_random_sign_mask: bool,
+    with_rht: bool,
+) -> None:
+
+    # paged stashing means that the sum of total tokens is less than
+    # or equal to the buffer size, you can have buffer [2048, 1024]
+    # and when you only receive 1024 tokens, the last half is garbage
+    # so input has shape [2048, 1024]
+    # split sections can be [256, 256, 256, 256], sums to 1024
+    valid_M = 0 if edge_cases == "zero_tokens_all" else M // 2
+    split_sections = generate_split_sections(valid_M, N, edge_cases)
+
+    # sanity check
+    if edge_cases == "zero_tokens_all":
+        assert valid_M == 0, "valid_M must be 0 when edge_cases is zero_tokens_all"
+    else:
+        assert valid_M == M // 2, "valid_M must be M // 2 when edge_cases is not zero_tokens_all"
+
+    # currently disable pre-RHT amax
+    with_post_rht_amax = with_rht
+
+    if quantize_mode == "quantize":
+        return_identity = True
+        return_transpose = False
+    elif quantize_mode == "quantize_transpose":
+        return_identity = True
+        return_transpose = True
+    elif quantize_mode == "quantize_colwise_only":
+        return_identity = False
+        return_transpose = True
+    else:
+        raise ValueError(f"Invalid quantize mode: {quantize_mode}")
+
+    check_grouped_tensor_nvfp4_with_paged_stashing(
+        x_dtype=x_dtype,
+        M=M,
+        N=N,
+        return_identity=return_identity,
+        return_transpose=return_transpose,
+        split_sections=split_sections,
+        with_rht=with_rht,
+        with_post_rht_amax=with_post_rht_amax,
+        with_random_sign_mask=with_random_sign_mask,
+        valid_M=valid_M,
     )
