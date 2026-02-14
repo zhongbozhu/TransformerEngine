@@ -308,16 +308,6 @@ def check_grouped_tensor_nvfp4_with_paged_stashing(
     # the kernel is expected to porcess it correctly by becoming no-op for cuda graph
     group_quantized_output = fused_grouped_quantize(x, split_section_tensor, quantizers[0])
 
-    # print(f"group_quantized_output data shape: {group_quantized_output.data.shape if group_quantized_output.data is not None else None}")
-    # print(f"group_quantized_output scale_inv shape: {group_quantized_output.scale_inv.shape if group_quantized_output.scale_inv is not None else None}")
-    # print(f"group_quantized_output columnwise data shape: {group_quantized_output.columnwise_data.shape if group_quantized_output.columnwise_data is not None else None}")
-    # print(f"group_quantized_output columnwise scale shape: {group_quantized_output.columnwise_scale_inv.shape if group_quantized_output.columnwise_scale_inv is not None else None}")
-    # print(f"group_quantized_output amax shape: {group_quantized_output.amax.shape if group_quantized_output.amax is not None else None}")
-    # print(f"group_quantized_output columnwise amax shape: {group_quantized_output.columnwise_amax.shape if group_quantized_output.columnwise_amax is not None else None}")
-    # print(f"group_quantized_output first_dims: {group_quantized_output.first_dims if group_quantized_output.first_dims is not None else None}")
-    # print(f"group_quantized_output last_dims: {group_quantized_output.last_dims if group_quantized_output.last_dims is not None else None}")
-    # print(f"group_quantized_output tensor_offsets: {group_quantized_output.tensor_offsets if group_quantized_output.tensor_offsets is not None else None}")
-
     # get a list of nvfp4 quantized tensors for testing
     split_quantize_outputs = group_quantized_output.split_into_quantized_tensors()
 
