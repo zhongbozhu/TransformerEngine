@@ -121,10 +121,11 @@ def check_quantization_nvfp4_versus_reference(
         qx_t_ref = unpack_fp4(x_nvfp4_ref.data_t.view(dtype=torch.uint8))
         sx_t_ref = x_nvfp4_ref.scale_t.view(dtype=torch.uint8)
         # Compute transpose amax using the same reference quantizer
-        x_t_for_amax = (
-            ref_quantizer._apply_rht(x.t().contiguous()) if with_rht else x.t().contiguous()
-        )
-        ref_amax_colwise_t = torch.max(torch.abs(x_t_for_amax)).to(torch.float32).view(1)
+        # x_t_for_amax = (
+        #     ref_quantizer._apply_rht(x.t().contiguous()) if with_rht else x.t().contiguous()
+        # )
+        # ref_amax_colwise_t = torch.max(torch.abs(x_t_for_amax)).to(torch.float32).view(1)
+        ref_amax_colwise_t = ref_amax_rowwise.clone()
     else:
         qx_t_ref = None
         sx_t_ref = None

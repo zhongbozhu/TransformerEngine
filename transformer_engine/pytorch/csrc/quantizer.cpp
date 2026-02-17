@@ -1481,10 +1481,44 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
       // We need:
       // 1. Rowwise amax = amax for input
       // 2. Columnwise amax = amax for RHT(input.t)
-      NVTE_SCOPED_GIL_RELEASE({
-        nvte_hadamard_transform_amax(input.data(), out.data(), 0,
-                                     this->rht_matrix_random_sign_mask_t, stream);
-      });
+      // NVTE_SCOPED_GIL_RELEASE({
+      //   nvte_hadamard_transform_amax(input.data(), out.data(), 0,
+      //                                this->rht_matrix_random_sign_mask_t, stream);
+      // });
+      auto rowwise_amax_ptr = out.get_amax().data_ptr;
+      auto columnwise_amax_ptr = out.get_columnwise_amax().data_ptr;
+      void* amax_ptr = rowwise_amax_ptr != nullptr ? rowwise_amax_ptr : columnwise_amax_ptr;
+      NVTE_CHECK(amax_ptr != nullptr, "Could not find amax pointer");
+
+      // Compute amax of input tensor
+      {
+        const auto input_nvte = input.get_rowwise_data();
+        const auto input_shape_size_t = nvte_shape_to_vector(input_nvte.shape);
+        const std::vector<int64_t> input_shape_int64(input_shape_size_t.begin(),
+                                                     input_shape_size_t.end());
+        auto input_tensor = at::from_blob(
+            input_nvte.data_ptr, input_shape_int64,
+            [](void*) {},  // deleter doing nothing since it doesn't own the data
+            at::device(at::kCUDA).dtype(GetATenDType(static_cast<DType>(input_nvte.dtype))));
+        auto amax_tensor = at::from_blob(
+            amax_ptr, std::vector<int64_t>{1},
+            [](void*) {},  // deleter doing nothing since it doesn't own the data
+            at::device(at::kCUDA).dtype(torch::kFloat32));
+
+        // Compute reduction in FP32 regardless of input dtype (e.g., BF16 input).
+        amax_tensor.copy_(at::amax(at::abs(input_tensor.to(torch::kFloat32))).view({1}));
+      }
+
+      // Make sure row-wise and column-wise amaxes match
+      if (rowwise_amax_ptr != amax_ptr && rowwise_amax_ptr != nullptr) {
+        NVTE_CHECK_CUDA(cudaMemcpyAsync(rowwise_amax_ptr, amax_ptr, sizeof(float),
+                                        cudaMemcpyDeviceToDevice, stream));
+      }
+      if (columnwise_amax_ptr != amax_ptr && columnwise_amax_ptr != nullptr) {
+        NVTE_CHECK_CUDA(cudaMemcpyAsync(columnwise_amax_ptr, amax_ptr, sizeof(float),
+                                        cudaMemcpyDeviceToDevice, stream));
+      }
+
     } else {
       // raise error since it's not supported yet
       NVTE_CHECK(false, "Pre-RHT amax is not supported yet");

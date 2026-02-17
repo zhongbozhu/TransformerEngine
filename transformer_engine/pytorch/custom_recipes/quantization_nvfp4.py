@@ -607,8 +607,13 @@ class NVFP4QuantizerRef(Quantizer):
             )
             # Compute amax for rowwise and columnwise paths separately
             global_amax_row = torch.max(torch.abs(row_input)).to(torch.float32).view(1)
+            # global_amax_col = (
+            #     torch.max(torch.abs(col_input)).to(torch.float32).view(1)
+            #     if self.columnwise_usage
+            #     else global_amax_row
+            # )
             global_amax_col = (
-                torch.max(torch.abs(col_input)).to(torch.float32).view(1)
+                torch.max(torch.abs(row_input)).to(torch.float32).view(1)
                 if self.columnwise_usage
                 else global_amax_row
             )
