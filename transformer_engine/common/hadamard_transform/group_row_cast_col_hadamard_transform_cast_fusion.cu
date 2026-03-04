@@ -883,15 +883,17 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
                 cutlass::multiplies<cutlass::Array<ElementAccumulator, NumVecs>>{}(
                     qpvscale_ups, global_decode_scale);
             cutlass::Array<ElementAccumulator, NumVecs> acc_scales;
-            if constexpr (kUseFastMath) {
-              // Fast math: compute approximate reciprocal
-              acc_scales =
-                  cutlass::reciprocal_approximate_ftz<decltype(qpvscale_scaled)>{}(qpvscale_scaled);
-            } else {
-              // Accurate math: compute reciprocal with division
-              acc_scales = cutlass::divides<cutlass::Array<ElementAccumulator, NumVecs>>{}(
-                  1.0, qpvscale_scaled);
-            }
+            // if constexpr (kUseFastMath) {
+            //   // Fast math: compute approximate reciprocal
+            //   acc_scales =
+            //       cutlass::reciprocal_approximate_ftz<decltype(qpvscale_scaled)>{}(qpvscale_scaled);
+            // } else {
+            //   // Accurate math: compute reciprocal with division
+            //   acc_scales = cutlass::divides<cutlass::Array<ElementAccumulator, NumVecs>>{}(
+            //       1.0, qpvscale_scaled);
+            // }
+            acc_scales = cutlass::divides<cutlass::Array<ElementAccumulator, NumVecs>>{}(
+              1.0, qpvscale_scaled);
 
             // Prepare stochastic rounding random state if enabled
             uint4 random_uint4 = uint4{0, 0, 0, 0};
@@ -1086,14 +1088,15 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device(
               auto qpvscale_scaled =
                   cutlass::multiplies<ElementAccumulator>{}(qpvscale_ups, global_decode_scale);
               ElementAccumulator acc_scales;
-              if constexpr (kUseFastMath) {
-                // Fast math: compute approximate reciprocal
-                acc_scales = cutlass::reciprocal_approximate_ftz<decltype(qpvscale_scaled)>{}(
-                    qpvscale_scaled);
-              } else {
-                // Accurate math: compute reciprocal with division
-                acc_scales = cutlass::divides<ElementAccumulator>{}(1.0, qpvscale_scaled);
-              }
+              // if constexpr (kUseFastMath) {
+              //   // Fast math: compute approximate reciprocal
+              //   acc_scales = cutlass::reciprocal_approximate_ftz<decltype(qpvscale_scaled)>{}(
+              //       qpvscale_scaled);
+              // } else {
+              //   // Accurate math: compute reciprocal with division
+              //   acc_scales = cutlass::divides<ElementAccumulator>{}(1.0, qpvscale_scaled);
+              // }
+              acc_scales = cutlass::divides<ElementAccumulator>{}(1.0, qpvscale_scaled);
               auto acc_scale = cutlass::minimum_with_nan_propagation<ElementAccumulator>{}(
                   acc_scales, cutlass::platform::numeric_limits<ElementAccumulator>::max());
               uint4 random_uint4 = uint4{0, 0, 0, 0};

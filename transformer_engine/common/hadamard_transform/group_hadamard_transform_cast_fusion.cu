@@ -658,15 +658,17 @@ __global__ static void group_rht_gemm_device(
           auto qpvscale_scaled = cutlass::multiplies<cutlass::Array<ElementAccumulator, NumVecs>>{}(
               qpvscale_ups, global_decode_scale);
           cutlass::Array<ElementAccumulator, NumVecs> acc_scales;
-          if constexpr (kUseFastMath) {
-            // Fast math: compute approximate reciprocal
-            acc_scales =
-                cutlass::reciprocal_approximate_ftz<decltype(qpvscale_scaled)>{}(qpvscale_scaled);
-          } else {
-            // Accurate math: compute reciprocal with division
-            acc_scales = cutlass::divides<cutlass::Array<ElementAccumulator, NumVecs>>{}(
-                1.0, qpvscale_scaled);
-          }
+          // if constexpr (kUseFastMath) {
+          //   // Fast math: compute approximate reciprocal
+          //   acc_scales =
+          //       cutlass::reciprocal_approximate_ftz<decltype(qpvscale_scaled)>{}(qpvscale_scaled);
+          // } else {
+          //   // Accurate math: compute reciprocal with division
+          //   acc_scales = cutlass::divides<cutlass::Array<ElementAccumulator, NumVecs>>{}(
+          //       1.0, qpvscale_scaled);
+          // }
+          acc_scales = cutlass::divides<cutlass::Array<ElementAccumulator, NumVecs>>{}(
+            1.0, qpvscale_scaled);
 
           // Initialize RNG for tile
           const size_t rng_sequence =

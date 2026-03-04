@@ -512,13 +512,14 @@ rht_gemm_device(MShape M, NShape N, KShape K, ClusterTileShape cluster_tile,
         auto qpvscale_ups = cutlass::NumericArrayConverter<ElementAccumulator, TSFC, NumVecs>{}(tC_rRowSFD_frg(_0{}));
         auto qpvscale_scaled = cutlass::multiplies<cutlass::Array<ElementAccumulator, NumVecs>>{}(qpvscale_ups, global_decode_scale);
         cutlass::Array<ElementAccumulator, NumVecs> acc_scales;
-        if constexpr (kUseFastMath) {
-          // Fast math: compute approximate reciprocal
-          acc_scales = cutlass::reciprocal_approximate_ftz<decltype(qpvscale_scaled)>{}(qpvscale_scaled);
-        } else {
-          // Accurate math: compute reciprocal with division
-          acc_scales = cutlass::divides<cutlass::Array<ElementAccumulator, NumVecs>>{}(1.0, qpvscale_scaled);
-        }
+        // if constexpr (kUseFastMath) {
+        //   // Fast math: compute approximate reciprocal
+        //   acc_scales = cutlass::reciprocal_approximate_ftz<decltype(qpvscale_scaled)>{}(qpvscale_scaled);
+        // } else {
+        //   // Accurate math: compute reciprocal with division
+        //   acc_scales = cutlass::divides<cutlass::Array<ElementAccumulator, NumVecs>>{}(1.0, qpvscale_scaled);
+        // }
+        acc_scales = cutlass::divides<cutlass::Array<ElementAccumulator, NumVecs>>{}(1.0, qpvscale_scaled);
 
         // Initialize RNG for tile
         const size_t rng_sequence

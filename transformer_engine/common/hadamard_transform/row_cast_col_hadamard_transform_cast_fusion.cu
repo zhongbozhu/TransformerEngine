@@ -816,13 +816,14 @@ __global__ static void row_col_rht_gemm_device(
             global_decode_scale);
 
           cutlass::Array<ElementAccumulator, NumVecs> acc_scales;
-          if constexpr (kUseFastMath) {
-            // fast math: use reciprocal approximate to replace div
-            acc_scales = cutlass::reciprocal_approximate_ftz<decltype(qpvscale_scaled)>{}(qpvscale_scaled);
-          } else {
-            // regular path for slower math, use divide to replace div
-            acc_scales = cutlass::divides<cutlass::Array<ElementAccumulator, NumVecs>>{}(1.0, qpvscale_scaled);
-          }
+          // if constexpr (kUseFastMath) {
+          //   // fast math: use reciprocal approximate to replace div
+          //   acc_scales = cutlass::reciprocal_approximate_ftz<decltype(qpvscale_scaled)>{}(qpvscale_scaled);
+          // } else {
+          //   // regular path for slower math, use divide to replace div
+          //   acc_scales = cutlass::divides<cutlass::Array<ElementAccumulator, NumVecs>>{}(1.0, qpvscale_scaled);
+          // }
+          acc_scales = cutlass::divides<cutlass::Array<ElementAccumulator, NumVecs>>{}(1.0, qpvscale_scaled);
 
           uint4 random_uint4 = uint4{0, 0, 0, 0};
           transformer_engine::curanddx::detail::philox4x32_native_state<10> rng;
@@ -980,13 +981,14 @@ __global__ static void row_col_rht_gemm_device(
             auto qpvscale_ups = cutlass::NumericConverter<ElementAccumulator, TSFA>{}(filter(tQArSFA)(v));
             auto qpvscale_scaled = cutlass::multiplies<ElementAccumulator>{}(qpvscale_ups, global_decode_scale);
             ElementAccumulator acc_scales;
-            if constexpr (kUseFastMath) {
-              // fast math: use reciprocal approximate to replace div
-              acc_scales = cutlass::reciprocal_approximate_ftz<decltype(qpvscale_scaled)>{}(qpvscale_scaled);
-            } else {
-              // regular path for slower math, use divide to replace div
-              acc_scales = cutlass::divides<ElementAccumulator>{}(1.0, qpvscale_scaled);
-            }
+            // if constexpr (kUseFastMath) {
+            //   // fast math: use reciprocal approximate to replace div
+            //   acc_scales = cutlass::reciprocal_approximate_ftz<decltype(qpvscale_scaled)>{}(qpvscale_scaled);
+            // } else {
+            //   // regular path for slower math, use divide to replace div
+            //   acc_scales = cutlass::divides<ElementAccumulator>{}(1.0, qpvscale_scaled);
+            // }
+            acc_scales = cutlass::divides<ElementAccumulator>{}(1.0, qpvscale_scaled);
             auto acc_scale = cutlass::minimum_with_nan_propagation<ElementAccumulator>{}(
               acc_scales,
               cutlass::platform::numeric_limits<ElementAccumulator>::max());
