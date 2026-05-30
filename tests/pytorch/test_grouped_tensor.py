@@ -232,6 +232,21 @@ class TestGroupedTensor:
         assert torch.equal(split_points, expected_split_points)
         assert torch.equal(tensor_offsets, expected_tensor_offsets)
 
+        multi_logical_last_dims = [logical_last_dim, 0, 1, logical_last_dim + 17]
+        multi_outputs = tex.prepare_grouped_splits(
+            split_sizes,
+            num_groups,
+            multi_logical_last_dims,
+        )
+        assert len(multi_outputs) == 3 + len(multi_logical_last_dims)
+        assert torch.equal(multi_outputs[0], expected_split_sizes)
+        assert torch.equal(multi_outputs[1], expected_base_offsets)
+        assert torch.equal(multi_outputs[2], expected_split_points)
+        for output, dim in zip(multi_outputs[3:], multi_logical_last_dims):
+            assert output.dtype == torch.int64
+            assert output.device.type == "cuda"
+            assert torch.equal(output, expected_base_offsets * dim)
+
         # cuDNN CuTe-DSL grouped GEMM kernels require 16-byte-aligned data
         # pointers for every tensor argument. ``split_points`` used to land at
         # an 8-byte-aligned offset inside the bulk buffer; pin the fix here so
@@ -243,6 +258,7 @@ class TestGroupedTensor:
             ("base_offsets", base_offsets),
             ("split_points", split_points),
             ("tensor_offsets", tensor_offsets),
+            *((f"multi_output_{idx}", output) for idx, output in enumerate(multi_outputs)),
         ):
             assert (
                 tensor.data_ptr() % 16 == 0

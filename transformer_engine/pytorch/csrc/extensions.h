@@ -181,6 +181,27 @@ py::object te_general_grouped_gemm_for_discrete_out(py::handle A, bool transa, p
                                                     bool use_split_accumulator, int math_sm_count);
 
 /***************************************************************************************************
+ * Mega C++ grouped MLP
+ **************************************************************************************************/
+
+std::vector<at::Tensor> megacpp_grouped_mlp_forward(
+    const at::Tensor &input, const at::Tensor &split_sizes, py::handle fc1_weight,
+    py::handle fc1_bias, py::handle fc2_weight, py::handle fc2_bias, const at::Tensor &scales,
+    const std::string &activation, int64_t glu_interleave_size, double activation_limit,
+    double activation_alpha, double activation_glu_linear_offset);
+
+std::vector<at::Tensor> megacpp_grouped_mlp_backward(
+    const at::Tensor &grad_output, const at::Tensor &split_sizes, const at::Tensor &x_offsets,
+    const at::Tensor &fc1_offsets, const at::Tensor &fc2_offsets,
+    const at::Tensor &fc2_dy_offsets, const at::Tensor &base_offsets,
+    const at::Tensor &x, const at::Tensor &fc1_activation_input, const at::Tensor &fc2_x,
+    const at::Tensor &scales, py::handle fc1_weight, py::handle fc2_weight,
+    py::handle fc1_wgrad_output, bool fc1_accumulate_wgrad, py::handle fc2_wgrad_output,
+    bool fc2_accumulate_wgrad, const std::string &activation, int64_t glu_interleave_size,
+    double activation_limit, double activation_alpha, double activation_glu_linear_offset,
+    bool input_requires_grad);
+
+/***************************************************************************************************
  * Transpose
  **************************************************************************************************/
 
@@ -488,6 +509,8 @@ size_t get_cudnn_version();
 at::Tensor splits_to_offsets(const at::Tensor &first_dims, int64_t logical_last_dim);
 std::vector<at::Tensor> prepare_grouped_splits(const at::Tensor &split_sizes, int64_t num_groups,
                                                int64_t logical_last_dim);
+std::vector<at::Tensor> prepare_grouped_splits(const at::Tensor &split_sizes, int64_t num_groups,
+                                               const std::vector<int64_t> &logical_last_dims);
 
 at::Tensor copy_data_ptrs_to_device(const std::vector<at::Tensor> &tensors,
                                     const c10::Device &device);

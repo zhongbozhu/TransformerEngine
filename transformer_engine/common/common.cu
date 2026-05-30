@@ -135,7 +135,14 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
                                   int64_t *__restrict__ first_dims_i64,
                                   int64_t *__restrict__ base_offsets,
                                   int32_t *__restrict__ split_points,
-                                  int64_t *__restrict__ tensor_offsets, int64_t logical_last_dim,
+                                  int64_t *__restrict__ tensor_offsets0,
+                                  int64_t logical_last_dim0,
+                                  int64_t *__restrict__ tensor_offsets1,
+                                  int64_t logical_last_dim1,
+                                  int64_t *__restrict__ tensor_offsets2,
+                                  int64_t logical_last_dim2,
+                                  int64_t *__restrict__ tensor_offsets3,
+                                  int64_t logical_last_dim3, size_t num_tensor_offsets,
                                   size_t num_tensors) {
   __shared__ int64_t block_scan[kThreadsPerBlock];
   __shared__ int64_t chunk_prefix;
@@ -143,7 +150,10 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
   const size_t tid = threadIdx.x;
   if (tid == 0) {
     base_offsets[0] = 0;
-    tensor_offsets[0] = 0;
+    if (num_tensor_offsets > 0) tensor_offsets0[0] = 0;
+    if (num_tensor_offsets > 1) tensor_offsets1[0] = 0;
+    if (num_tensor_offsets > 2) tensor_offsets2[0] = 0;
+    if (num_tensor_offsets > 3) tensor_offsets3[0] = 0;
     chunk_prefix = 0;
   }
   __syncthreads();
@@ -172,7 +182,10 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
       // cuDNN grouped GEMM expects padded split end offsets as int32.  TE
       // GroupedTensor metadata keeps the full int64 base_offsets/tensor_offsets.
       split_points[idx] = static_cast<int32_t>(prefix);
-      tensor_offsets[idx + 1] = prefix * logical_last_dim;
+      if (num_tensor_offsets > 0) tensor_offsets0[idx + 1] = prefix * logical_last_dim0;
+      if (num_tensor_offsets > 1) tensor_offsets1[idx + 1] = prefix * logical_last_dim1;
+      if (num_tensor_offsets > 2) tensor_offsets2[idx + 1] = prefix * logical_last_dim2;
+      if (num_tensor_offsets > 3) tensor_offsets3[idx + 1] = prefix * logical_last_dim3;
     }
     __syncthreads();
 
@@ -226,17 +239,18 @@ void nvte_splits_to_offsets(const int64_t *first_dims, int64_t *output, size_t n
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
-void nvte_prepare_grouped_splits(const NVTETensor first_dims, NVTETensor first_dims_i64,
-                                 NVTETensor base_offsets, NVTETensor split_points,
-                                 NVTETensor tensor_offsets, int64_t logical_last_dim,
-                                 cudaStream_t stream) {
+void nvte_prepare_grouped_splits(const NVTEGroupedSplitMetadata *metadata, cudaStream_t stream) {
   NVTE_API_CALL(nvte_prepare_grouped_splits);
 
-  const auto *first_dims_tensor = convertNVTETensorCheck(first_dims);
-  const auto *first_dims_i64_tensor = convertNVTETensorCheck(first_dims_i64);
-  const auto *base_offsets_tensor = convertNVTETensorCheck(base_offsets);
-  const auto *split_points_tensor = convertNVTETensorCheck(split_points);
-  const auto *tensor_offsets_tensor = convertNVTETensorCheck(tensor_offsets);
+  NVTE_CHECK(metadata != nullptr, "metadata must not be null.");
+  NVTE_CHECK(metadata->num_tensor_offsets > 0 &&
+                 metadata->num_tensor_offsets <= NVTE_MAX_GROUPED_SPLIT_TENSOR_OFFSETS,
+             "num_tensor_offsets must be in [1, ", NVTE_MAX_GROUPED_SPLIT_TENSOR_OFFSETS, "].");
+
+  const auto *first_dims_tensor = convertNVTETensorCheck(metadata->first_dims);
+  const auto *first_dims_i64_tensor = convertNVTETensorCheck(metadata->first_dims_i64);
+  const auto *base_offsets_tensor = convertNVTETensorCheck(metadata->base_offsets);
+  const auto *split_points_tensor = convertNVTETensorCheck(metadata->split_points);
   const auto first_dims_dtype = first_dims_tensor->dtype();
   const auto num_tensors = first_dims_tensor->numel();
   const auto offsets_numel = num_tensors + 1;
@@ -244,17 +258,28 @@ void nvte_prepare_grouped_splits(const NVTETensor first_dims, NVTETensor first_d
     return tensor->dim() == 1 && tensor->dtype() == dtype && tensor->numel() == numel;
   };
 
-  NVTE_CHECK(num_tensors > 0 && logical_last_dim >= 0 && first_dims_tensor->dim() == 1 &&
-                 (first_dims_dtype == DType::kInt32 || first_dims_dtype == DType::kInt64) &&
-                 is_tensor(first_dims_i64_tensor, DType::kInt64, num_tensors) &&
-                 is_tensor(base_offsets_tensor, DType::kInt64, offsets_numel) &&
-                 is_tensor(split_points_tensor, DType::kInt32, num_tensors) &&
-                 is_tensor(tensor_offsets_tensor, DType::kInt64, offsets_numel),
-             "Invalid grouped split metadata. Expected first_dims int32/int64[N], "
-             "first_dims_i64 int64[N], base_offsets int64[N+1], split_points int32[N], "
-             "tensor_offsets int64[N+1], and logical_last_dim >= 0.");
+  NVTE_CHECK(num_tensors > 0 && first_dims_tensor->dim() == 1 &&
+                  (first_dims_dtype == DType::kInt32 || first_dims_dtype == DType::kInt64) &&
+                  is_tensor(first_dims_i64_tensor, DType::kInt64, num_tensors) &&
+                  is_tensor(base_offsets_tensor, DType::kInt64, offsets_numel) &&
+                  is_tensor(split_points_tensor, DType::kInt32, num_tensors),
+              "Invalid grouped split metadata. Expected first_dims int32/int64[N], "
+              "first_dims_i64 int64[N], base_offsets int64[N+1], and split_points int32[N].");
   // split_points is the only int32 output by design: cuDNN grouped GEMM uses
   // int32 padded split end offsets, while TE grouped tensor offsets are int64.
+
+  const Tensor *tensor_offsets_tensors[NVTE_MAX_GROUPED_SPLIT_TENSOR_OFFSETS] = {};
+  int64_t *tensor_offsets_ptrs[NVTE_MAX_GROUPED_SPLIT_TENSOR_OFFSETS] = {};
+  int64_t logical_last_dims[NVTE_MAX_GROUPED_SPLIT_TENSOR_OFFSETS] = {};
+  for (size_t i = 0; i < metadata->num_tensor_offsets; ++i) {
+    tensor_offsets_tensors[i] = convertNVTETensorCheck(metadata->tensor_offsets[i]);
+    logical_last_dims[i] = metadata->logical_last_dims[i];
+    NVTE_CHECK(logical_last_dims[i] >= 0 &&
+                   is_tensor(tensor_offsets_tensors[i], DType::kInt64, offsets_numel),
+               "Invalid grouped split tensor_offsets[", i,
+               "]. Expected int64[N+1] and a non-negative logical_last_dim.");
+    tensor_offsets_ptrs[i] = static_cast<int64_t *>(tensor_offsets_tensors[i]->data.dptr);
+  }
 
   switch (first_dims_dtype) {
     case DType::kInt32:
@@ -262,16 +287,20 @@ void nvte_prepare_grouped_splits(const NVTETensor first_dims, NVTETensor first_d
           static_cast<const int32_t *>(first_dims_tensor->data.dptr),
           static_cast<int64_t *>(first_dims_i64_tensor->data.dptr),
           static_cast<int64_t *>(base_offsets_tensor->data.dptr),
-          static_cast<int32_t *>(split_points_tensor->data.dptr),
-          static_cast<int64_t *>(tensor_offsets_tensor->data.dptr), logical_last_dim, num_tensors);
+          static_cast<int32_t *>(split_points_tensor->data.dptr), tensor_offsets_ptrs[0],
+          logical_last_dims[0], tensor_offsets_ptrs[1], logical_last_dims[1],
+          tensor_offsets_ptrs[2], logical_last_dims[2], tensor_offsets_ptrs[3],
+          logical_last_dims[3], metadata->num_tensor_offsets, num_tensors);
       break;
     case DType::kInt64:
       prepare_grouped_splits_kernel<<<1, kThreadsPerBlock, 0, stream>>>(
           static_cast<const int64_t *>(first_dims_tensor->data.dptr),
           static_cast<int64_t *>(first_dims_i64_tensor->data.dptr),
           static_cast<int64_t *>(base_offsets_tensor->data.dptr),
-          static_cast<int32_t *>(split_points_tensor->data.dptr),
-          static_cast<int64_t *>(tensor_offsets_tensor->data.dptr), logical_last_dim, num_tensors);
+          static_cast<int32_t *>(split_points_tensor->data.dptr), tensor_offsets_ptrs[0],
+          logical_last_dims[0], tensor_offsets_ptrs[1], logical_last_dims[1],
+          tensor_offsets_ptrs[2], logical_last_dims[2], tensor_offsets_ptrs[3],
+          logical_last_dims[3], metadata->num_tensor_offsets, num_tensors);
       break;
     default:
       NVTE_ERROR("first_dims must have dtype int32 or int64.");

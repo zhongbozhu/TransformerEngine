@@ -296,6 +296,24 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("te_general_grouped_gemm_for_discrete_out",
         &transformer_engine::pytorch::te_general_grouped_gemm_for_discrete_out,
         "Grouped GEMM for discrete output list");
+  m.def("megacpp_grouped_mlp_forward",
+        &transformer_engine::pytorch::megacpp_grouped_mlp_forward,
+        "Mega C++ grouped MLP forward", py::arg("input"), py::arg("split_sizes"),
+        py::arg("fc1_weight"), py::arg("fc1_bias"), py::arg("fc2_weight"), py::arg("fc2_bias"),
+        py::arg("scales"), py::arg("activation"), py::arg("glu_interleave_size"),
+        py::arg("activation_limit") = 0.0, py::arg("activation_alpha") = 0.0,
+        py::arg("activation_glu_linear_offset") = 0.0);
+  m.def("megacpp_grouped_mlp_backward",
+        &transformer_engine::pytorch::megacpp_grouped_mlp_backward,
+        "Mega C++ grouped MLP backward", py::arg("grad_output"), py::arg("split_sizes"),
+        py::arg("x_offsets"), py::arg("fc1_offsets"), py::arg("fc2_offsets"),
+        py::arg("fc2_dy_offsets"), py::arg("base_offsets"), py::arg("x"),
+        py::arg("fc1_activation_input"), py::arg("fc2_x"), py::arg("scales"), py::arg("fc1_weight"),
+        py::arg("fc2_weight"), py::arg("fc1_wgrad_output"), py::arg("fc1_accumulate_wgrad"),
+        py::arg("fc2_wgrad_output"), py::arg("fc2_accumulate_wgrad"), py::arg("activation"),
+        py::arg("glu_interleave_size"), py::arg("activation_limit") = 0.0,
+        py::arg("activation_alpha") = 0.0, py::arg("activation_glu_linear_offset") = 0.0,
+        py::arg("input_requires_grad") = true);
   m.def("fp8_transpose", &transformer_engine::pytorch::fp8_transpose, "Transpose with FP8 I/O",
         py::arg("input"), py::arg("dtype"), py::kw_only(), py::arg("out"),
         py::call_guard<py::gil_scoped_release>());
@@ -501,9 +519,16 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("splits_to_offsets", &transformer_engine::pytorch::splits_to_offsets,
         "Compute grouped tensor offsets from split sizes", py::arg("first_dims"),
         py::arg("logical_last_dim"), py::call_guard<py::gil_scoped_release>());
-  m.def("prepare_grouped_splits", &transformer_engine::pytorch::prepare_grouped_splits,
+  m.def("prepare_grouped_splits",
+        py::overload_cast<const at::Tensor &, int64_t, int64_t>(
+            &transformer_engine::pytorch::prepare_grouped_splits),
         "Prepare grouped split metadata from CPU/CUDA int32 or int64 split sizes",
         py::arg("split_sizes"), py::arg("num_groups"), py::arg("logical_last_dim"));
+  m.def("prepare_grouped_splits",
+        py::overload_cast<const at::Tensor &, int64_t, const std::vector<int64_t> &>(
+            &transformer_engine::pytorch::prepare_grouped_splits),
+        "Prepare grouped split metadata and several tensor-offset vectors",
+        py::arg("split_sizes"), py::arg("num_groups"), py::arg("logical_last_dims"));
   m.def("get_num_cublas_streams", &nvte_get_num_compute_streams, "Get number of compute streams",
         py::call_guard<py::gil_scoped_release>());
 
