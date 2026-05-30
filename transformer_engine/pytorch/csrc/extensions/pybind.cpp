@@ -309,8 +309,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("x_offsets"), py::arg("fc1_offsets"), py::arg("fc2_offsets"),
         py::arg("fc2_dy_offsets"), py::arg("base_offsets"), py::arg("x"),
         py::arg("fc1_activation_input"), py::arg("fc2_x"), py::arg("scales"), py::arg("fc1_weight"),
-        py::arg("fc2_weight"), py::arg("fc1_wgrad_output"), py::arg("fc1_accumulate_wgrad"),
-        py::arg("fc2_wgrad_output"), py::arg("fc2_accumulate_wgrad"), py::arg("activation"),
+        py::arg("fc2_weight"), py::arg("fc1_wgrad_output"), py::arg("fc1_compute_wgrad"),
+        py::arg("fc1_accumulate_wgrad"), py::arg("fc2_wgrad_output"),
+        py::arg("fc2_compute_wgrad"), py::arg("fc2_accumulate_wgrad"), py::arg("activation"),
         py::arg("glu_interleave_size"), py::arg("activation_limit") = 0.0,
         py::arg("activation_alpha") = 0.0, py::arg("activation_glu_linear_offset") = 0.0,
         py::arg("input_requires_grad") = true);

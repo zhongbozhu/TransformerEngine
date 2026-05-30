@@ -190,7 +190,6 @@ def _assert_grouped_mlp_close(
             True,
             id="bias_no_delay_accumulate_main_grad",
         ),
-        pytest.param(True, True, torch.int64, "cuda", None, False, False, id="bias_delay_i64_cuda"),
         pytest.param(
             False,
             True,
@@ -202,38 +201,28 @@ def _assert_grouped_mlp_close(
             id="bias_no_delay_single_grouped_param",
         ),
         pytest.param(
-            True,
+            False,
             True,
             torch.int32,
             "cuda",
             32,
             False,
             False,
-            id="bias_delay_i32_cuda_interleave",
+            id="bias_no_delay_i32_cuda_interleave",
         ),
         pytest.param(
-            True,
+            False,
             False,
             torch.int64,
             "cpu",
             32,
             False,
             False,
-            id="no_bias_delay_i64_cpu_interleave",
-        ),
-        pytest.param(
-            True,
-            True,
-            torch.int64,
-            "cuda",
-            None,
-            True,
-            False,
-            id="bias_delay_single_grouped_param",
+            id="no_bias_no_delay_i64_cpu_interleave",
         ),
     ],
 )
-def test_megacpp_grouped_mlp_bf16_matches_python_and_delay_wgrad(case, monkeypatch):
+def test_megacpp_grouped_mlp_bf16_matches_python(case, monkeypatch):
     (
         delay_wgrad_compute,
         bias,
@@ -311,3 +300,36 @@ def test_megacpp_grouped_mlp_bf16_matches_python_and_delay_wgrad(case, monkeypat
     torch.testing.assert_close(x_test.grad, x_ref.grad, rtol=2e-2, atol=2e-2)
     torch.testing.assert_close(scales_test.grad, scales_ref.grad, rtol=2e-2, atol=2e-2)
     _assert_grouped_mlp_close(test, ref, accumulate_into_main_grad=accumulate_into_main_grad)
+
+
+def test_megacpp_grouped_mlp_delay_wgrad_raises():
+    torch.manual_seed(1234)
+    num_groups = 3
+    hidden_size = 64
+    ffn_hidden_size = 128
+    split_sizes = torch.tensor([64, 96, 128], dtype=torch.int64, device="cuda")
+    total_tokens = int(split_sizes.sum().item())
+    module = _make_grouped_mlp(
+        num_groups=num_groups,
+        hidden_size=hidden_size,
+        ffn_hidden_size=ffn_hidden_size,
+        bias=True,
+        delay_wgrad_compute=True,
+        accumulate_into_main_grad=False,
+        backend="megacpp",
+        glu_interleave_size=None,
+        single_grouped_param=False,
+    )
+    x = torch.randn(total_tokens, hidden_size, device="cuda", dtype=torch.bfloat16).requires_grad_()
+    scales = torch.rand(total_tokens, device="cuda", dtype=torch.bfloat16).requires_grad_()
+    dy = torch.randn(total_tokens, hidden_size, device="cuda", dtype=torch.bfloat16)
+
+    with pytest.raises(ValueError, match="delay_wgrad_compute"):
+        _run_grouped_mlp(
+            module,
+            x,
+            split_sizes,
+            scales,
+            dy,
+            delay_wgrad_compute=False,
+        )

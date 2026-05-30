@@ -196,10 +196,10 @@ std::vector<at::Tensor> megacpp_grouped_mlp_backward(
     const at::Tensor &fc2_dy_offsets, const at::Tensor &base_offsets,
     const at::Tensor &x, const at::Tensor &fc1_activation_input, const at::Tensor &fc2_x,
     const at::Tensor &scales, py::handle fc1_weight, py::handle fc2_weight,
-    py::handle fc1_wgrad_output, bool fc1_accumulate_wgrad, py::handle fc2_wgrad_output,
-    bool fc2_accumulate_wgrad, const std::string &activation, int64_t glu_interleave_size,
-    double activation_limit, double activation_alpha, double activation_glu_linear_offset,
-    bool input_requires_grad);
+    py::handle fc1_wgrad_output, bool fc1_compute_wgrad, bool fc1_accumulate_wgrad,
+    py::handle fc2_wgrad_output, bool fc2_compute_wgrad, bool fc2_accumulate_wgrad,
+    const std::string &activation, int64_t glu_interleave_size, double activation_limit,
+    double activation_alpha, double activation_glu_linear_offset, bool input_requires_grad);
 
 /***************************************************************************************************
  * Transpose

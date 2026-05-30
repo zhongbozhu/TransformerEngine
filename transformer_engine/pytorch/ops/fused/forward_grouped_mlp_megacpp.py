@@ -89,7 +89,7 @@ class ForwardGroupedMLP_MegaCpp(FusedOperation):
     """Experimental BF16/FP16 grouped MLP forward implemented in C++.
 
     The C++ function returns plain tensors only. Python still owns autograd
-    context layout and delayed wgrad scheduling.
+    context layout; delayed wgrad is rejected by the matching backward op.
     """
 
     @classmethod
