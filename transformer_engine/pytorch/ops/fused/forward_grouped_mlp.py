@@ -203,15 +203,15 @@ class _ForwardGroupedMLP_CuTeGEMMBase_MXFP8(FusedOperation):
         # canonical TE representation: int64[num_groups].  Python uses it from here
         # onward for grouped quantization and backward state.
         #
-        # base_split_offsets: int64[num_groups + 1], [0, cumsum(split_sizes)]
         # split_points: int32[num_groups], cumsum(split_sizes) without the leading 0
+        # base_split_offsets: int64[num_groups + 1], [0, cumsum(split_sizes)]
         # fc2_x_tensor_offsets: int64[num_groups + 1], base_split_offsets * fc2 K
         (
             split_sizes,
-            base_split_offsets,
             split_points,
+            base_split_offsets,
             fc2_x_tensor_offsets,
-        ) = tex.prepare_grouped_splits(split_sizes, num_groups, fc2_weight_shape[1])
+        ) = tex.prepare_grouped_splits(split_sizes, num_groups, [1, fc2_weight_shape[1]])
 
         # Extract per-row activation probabilities from the middle op.
         scales = basic_op_extra_inputs[1][0]

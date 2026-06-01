@@ -508,8 +508,6 @@ size_t get_cudnn_version();
 
 at::Tensor splits_to_offsets(const at::Tensor &first_dims, int64_t logical_last_dim);
 std::vector<at::Tensor> prepare_grouped_splits(const at::Tensor &split_sizes, int64_t num_groups,
-                                               int64_t logical_last_dim);
-std::vector<at::Tensor> prepare_grouped_splits(const at::Tensor &split_sizes, int64_t num_groups,
                                                const std::vector<int64_t> &logical_last_dims);
 
 at::Tensor copy_data_ptrs_to_device(const std::vector<at::Tensor> &tensors,

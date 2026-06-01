@@ -509,49 +509,29 @@ void nvte_memset(void *ptr, int value, size_t size_in_bytes, cudaStream_t stream
 void nvte_splits_to_offsets(const int64_t *first_dims, int64_t *output, size_t num_tensors,
                             int64_t logical_last_dim, cudaStream_t stream);
 
-/* Fixed small capacity for offset vectors produced by nvte_prepare_grouped_splits.
- * This keeps the primitive to one CUDA kernel launch without allocating/copying
- * a device-side pointer array. Four covers the current grouped MLP call sites:
- * input, FC1 output, FC2 input, and final output offsets.
- */
-enum { NVTE_MAX_GROUPED_SPLIT_TENSOR_OFFSETS = 4 };
-
-/*! \struct NVTEGroupedSplitMetadata
- *  \brief Tensor bundle for grouped split metadata preparation.
+/*! \brief Compute several scaled prefix-sum offset vectors.
  *
- *  All tensors are device tensors. first_dims may be int32 or int64 with shape
- *  [num_tensors]. first_dims_i64 is int64[num_tensors]. base_offsets is
- *  int64[num_tensors + 1] and stores [0, cumsum(first_dims)]. split_points is
- *  int32[num_tensors] and stores cumsum(first_dims) without the leading 0.
- *  split_points is intentionally int32 because cuDNN grouped GEMM consumes
- *  int32 padded split end offsets; TE GroupedTensor metadata uses the int64
- *  base_offsets and tensor_offsets.
+ *  This is the batched form of nvte_splits_to_offsets for a single split-size
+ *  array. It scans split_sizes once and writes:
+ *    split_sizes_cumsum[j] = sum_{k=0..j}(split_sizes[k])
+ *    split_offsets_list[i][0] = 0
+ *    split_offsets_list[i][j + 1] = split_sizes_cumsum[j] * stride_list[i]
  *
- *  tensor_offsets[i] is int64[num_tensors + 1] and receives
- *  base_offsets * logical_last_dims[i]. num_tensor_offsets must be in
- *  [1, NVTE_MAX_GROUPED_SPLIT_TENSOR_OFFSETS].
- */
-struct NVTEGroupedSplitMetadata {
-  NVTETensor first_dims;
-  NVTETensor first_dims_i64;
-  NVTETensor base_offsets;
-  NVTETensor split_points;
-  NVTETensor tensor_offsets[NVTE_MAX_GROUPED_SPLIT_TENSOR_OFFSETS];
-  int64_t logical_last_dims[NVTE_MAX_GROUPED_SPLIT_TENSOR_OFFSETS];
-  size_t num_tensor_offsets;
-};
-
-/*! \brief Prepare grouped split metadata.
+ *  split_sizes, split_sizes_cumsum, and each split_offsets_list entry carry
+ *  their own dtype in NVTETensor metadata. Supported integer dtypes are int32
+ *  and int64.
  *
- *  This fused grouped-split primitive scans first_dims once, canonicalizes
- *  first_dims to int64, writes base offsets, writes cuDNN int32 split points,
- *  and writes one or more scaled int64 tensor-offset vectors.
- *
- *  \param[in,out] metadata Pointer to an NVTEGroupedSplitMetadata bundle.
+ *  \param[in] split_sizes Device int32/int64 split sizes with shape [N].
+ *  \param[in] stride_list Scale factor for each split array.
+ *  \param[out] split_sizes_cumsum Device int32/int64 cumsum output with shape [N].
+ *  \param[out] split_offsets_list Device int32/int64 offset tensors, each with shape [N + 1].
+ *  \param[in] list_size Number of tensors in split_offsets_list.
  *  \param[in] stream CUDA stream to use for the operation.
  */
-void nvte_prepare_grouped_splits(const struct NVTEGroupedSplitMetadata *metadata,
-                                 cudaStream_t stream);
+void nvte_multi_splits_to_offsets(NVTETensor split_sizes, const int64_t *stride_list,
+                                  NVTETensor split_sizes_cumsum,
+                                  NVTETensor *split_offsets_list, size_t list_size,
+                                  cudaStream_t stream);
 
 /*! \brief TE Grouped Tensor type
  *

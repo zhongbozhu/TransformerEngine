@@ -470,10 +470,15 @@ std::vector<at::Tensor> megacpp_grouped_mlp_forward(
   auto x = as_compute_tensor(input.reshape({-1, in_features}), dtype);
   auto split_metadata =
       prepare_grouped_splits(split_sizes, static_cast<int64_t>(num_groups),
-                             std::vector<int64_t>{in_features, fc1_out_features, fc2_in_features,
-                                                  fc2_out_features});
+                             std::vector<int64_t>{1, in_features, fc1_out_features,
+                                                  fc2_in_features, fc2_out_features});
+  // prepare_grouped_splits returns:
+  //   [0] split sizes as int64
+  //   [1] split_points as int32, consumed by cuDNN grouped GEMM paths
+  //   [2..] tensor offsets in the same order as the stride list above.
+  // megacpp uses cuBLAS grouped GEMM here, so split_points is intentionally skipped.
   auto split_sizes_i64 = split_metadata[0];
-  auto base_offsets = split_metadata[1];
+  auto base_offsets = split_metadata[2];
   auto x_offsets = split_metadata[3];
   auto fc1_offsets = split_metadata[4];
   auto fc2_offsets = split_metadata[5];

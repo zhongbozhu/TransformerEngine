@@ -61,16 +61,40 @@ void update_tensor_scale_inv(Tensor *t, cudaStream_t stream) {
 namespace {
 
 constexpr size_t kThreadsPerBlock = 256;
+// Fixed small host-side launch arg capacity. Keep this private to common.cu so
+// callers pass normal pointer arrays and only the common implementation owns the
+// kernel packing constraint.
+enum { NVTE_MAX_MULTI_SPLITS_TO_OFFSETS = 8 };
 
-struct GroupedSplitOffsetArgs {
+struct MultiSplitsToOffsetsArgs {
   // Unused entries must stay null/zero because the struct is passed by value
   // into the CUDA kernel with a fixed-capacity array.
-  int64_t *tensor_offsets[NVTE_MAX_GROUPED_SPLIT_TENSOR_OFFSETS] = {};
-  int64_t logical_last_dims[NVTE_MAX_GROUPED_SPLIT_TENSOR_OFFSETS] = {};
-  // Number of offset vectors to generate, not the number of grouped tensors.
-  // The grouped tensor count is the kernel's separate `num_tensors` argument.
-  size_t num_offset_vectors = 0;
+  const void *split_sizes = nullptr;
+  DType split_sizes_dtype = DType::kNumTypes;
+  void *split_sizes_cumsum = nullptr;
+  DType split_sizes_cumsum_dtype = DType::kNumTypes;
+  int64_t strides[NVTE_MAX_MULTI_SPLITS_TO_OFFSETS] = {};
+  void *split_offsets[NVTE_MAX_MULTI_SPLITS_TO_OFFSETS] = {};
+  DType split_offsets_dtype[NVTE_MAX_MULTI_SPLITS_TO_OFFSETS] = {};
+  size_t list_size = 0;
 };
+
+__device__ __forceinline__ int64_t load_split_size(const void *__restrict__ split_sizes,
+                                                   DType dtype, size_t idx) {
+  if (dtype == DType::kInt32) {
+    return static_cast<int64_t>(static_cast<const int32_t *>(split_sizes)[idx]);
+  }
+  return static_cast<const int64_t *>(split_sizes)[idx];
+}
+
+__device__ __forceinline__ void store_split_offset(void *__restrict__ split_offsets, DType dtype,
+                                                   size_t idx, int64_t value) {
+  if (dtype == DType::kInt32) {
+    static_cast<int32_t *>(split_offsets)[idx] = static_cast<int32_t>(value);
+    return;
+  }
+  static_cast<int64_t *>(split_offsets)[idx] = value;
+}
 
 template <typename TVectorized>
 __global__ void __launch_bounds__(kThreadsPerBlock)
@@ -140,23 +164,18 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
   }
 }
 
-template <typename FirstDimT>
 __global__ void __launch_bounds__(kThreadsPerBlock)
-    prepare_grouped_splits_kernel(const FirstDimT *__restrict__ first_dims,
-                                  int64_t *__restrict__ first_dims_i64,
-                                  int64_t *__restrict__ base_offsets,
-                                  int32_t *__restrict__ split_points,
-                                  GroupedSplitOffsetArgs offset_args, size_t num_tensors) {
+    multi_splits_to_offsets_kernel(MultiSplitsToOffsetsArgs args, size_t num_tensors) {
   __shared__ int64_t block_scan[kThreadsPerBlock];
   __shared__ int64_t chunk_prefix;
 
   const size_t tid = threadIdx.x;
+
   if (tid == 0) {
-    base_offsets[0] = 0;
-    for (size_t i = 0; i < offset_args.num_offset_vectors; ++i) {
-      offset_args.tensor_offsets[i][0] = 0;
-    }
     chunk_prefix = 0;
+    for (size_t list_idx = 0; list_idx < args.list_size; ++list_idx) {
+      store_split_offset(args.split_offsets[list_idx], args.split_offsets_dtype[list_idx], 0, 0);
+    }
   }
   __syncthreads();
 
@@ -165,8 +184,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
 
     block_scan[tid] = 0;
     if (idx < num_tensors) {
-      block_scan[tid] = static_cast<int64_t>(first_dims[idx]);
-      first_dims_i64[idx] = block_scan[tid];
+      block_scan[tid] = load_split_size(args.split_sizes, args.split_sizes_dtype, idx);
     }
     __syncthreads();
 
@@ -180,12 +198,10 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
 
     if (idx < num_tensors) {
       const int64_t prefix = chunk_prefix + block_scan[tid];
-      base_offsets[idx + 1] = prefix;
-      // cuDNN grouped GEMM expects padded split end offsets as int32.  TE
-      // GroupedTensor metadata keeps the full int64 base_offsets/tensor_offsets.
-      split_points[idx] = static_cast<int32_t>(prefix);
-      for (size_t i = 0; i < offset_args.num_offset_vectors; ++i) {
-        offset_args.tensor_offsets[i][idx + 1] = prefix * offset_args.logical_last_dims[i];
+      store_split_offset(args.split_sizes_cumsum, args.split_sizes_cumsum_dtype, idx, prefix);
+      for (size_t list_idx = 0; list_idx < args.list_size; ++list_idx) {
+        store_split_offset(args.split_offsets[list_idx], args.split_offsets_dtype[list_idx],
+                           idx + 1, prefix * args.strides[list_idx]);
       }
     }
     __syncthreads();
@@ -209,6 +225,59 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
     NVTE_CHECK_CUDA(cudaGetLastError());                                                     \
     return;                                                                                  \
   }
+
+void nvte_multi_splits_to_offsets_impl(NVTETensor split_sizes, const int64_t *stride_list,
+                                       NVTETensor split_sizes_cumsum,
+                                       NVTETensor *split_offsets_list, size_t list_size,
+                                       cudaStream_t stream) {
+  NVTE_CHECK(list_size > 0 && list_size < NVTE_MAX_MULTI_SPLITS_TO_OFFSETS,
+             "list_size must be in [1, ", NVTE_MAX_MULTI_SPLITS_TO_OFFSETS, ").");
+  NVTE_CHECK(stride_list != nullptr, "stride_list must not be null.");
+  NVTE_CHECK(split_offsets_list != nullptr, "split_offsets_list must not be null.");
+
+  const auto *split_sizes_tensor = convertNVTETensorCheck(split_sizes);
+  const auto *split_sizes_cumsum_tensor = convertNVTETensorCheck(split_sizes_cumsum);
+  const auto split_sizes_dtype = split_sizes_tensor->dtype();
+  const auto split_sizes_cumsum_dtype = split_sizes_cumsum_tensor->dtype();
+  const auto num_tensors = split_sizes_tensor->numel();
+  const auto offsets_numel = num_tensors + 1;
+  const auto is_integer_dtype = [](DType dtype) {
+    return dtype == DType::kInt32 || dtype == DType::kInt64;
+  };
+  const auto is_tensor = [](const Tensor *tensor, DType dtype, size_t numel) {
+    return tensor->dim() == 1 && tensor->dtype() == dtype && tensor->numel() == numel;
+  };
+
+  NVTE_CHECK(num_tensors > 0 && split_sizes_tensor->dim() == 1 &&
+                 is_integer_dtype(split_sizes_dtype),
+             "split_sizes must be a non-empty 1D int32/int64 tensor.");
+  NVTE_CHECK(is_tensor(split_sizes_cumsum_tensor, split_sizes_cumsum_dtype, num_tensors) &&
+                 is_integer_dtype(split_sizes_cumsum_dtype),
+             "split_sizes_cumsum must be a 1D int32/int64 tensor with the same length as "
+             "split_sizes.");
+
+  MultiSplitsToOffsetsArgs args = {};
+  args.split_sizes = split_sizes_tensor->data.dptr;
+  args.split_sizes_dtype = split_sizes_dtype;
+  args.split_sizes_cumsum = split_sizes_cumsum_tensor->data.dptr;
+  args.split_sizes_cumsum_dtype = split_sizes_cumsum_dtype;
+  args.list_size = list_size;
+  for (size_t i = 0; i < list_size; ++i) {
+    const auto *split_offsets_tensor = convertNVTETensorCheck(split_offsets_list[i]);
+    const auto split_offsets_dtype = split_offsets_tensor->dtype();
+    NVTE_CHECK(stride_list[i] >= 0, "stride_list[", i, "] must be non-negative.");
+    NVTE_CHECK(is_tensor(split_offsets_tensor, split_offsets_dtype, offsets_numel) &&
+                   is_integer_dtype(split_offsets_dtype),
+               "split_offsets_list[", i,
+               "] must be a 1D int32/int64 tensor with length split_sizes.numel() + 1.");
+    args.strides[i] = stride_list[i];
+    args.split_offsets[i] = split_offsets_tensor->data.dptr;
+    args.split_offsets_dtype[i] = split_offsets_dtype;
+  }
+
+  multi_splits_to_offsets_kernel<<<1, kThreadsPerBlock, 0, stream>>>(args, num_tensors);
+  NVTE_CHECK_CUDA(cudaGetLastError());
+}
 
 extern "C" {
 void nvte_memset(void *ptr, int value, size_t size_in_bytes, cudaStream_t stream) {
@@ -240,67 +309,13 @@ void nvte_splits_to_offsets(const int64_t *first_dims, int64_t *output, size_t n
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
-void nvte_prepare_grouped_splits(const NVTEGroupedSplitMetadata *metadata, cudaStream_t stream) {
-  NVTE_API_CALL(nvte_prepare_grouped_splits);
-
-  NVTE_CHECK(metadata != nullptr, "metadata must not be null.");
-  NVTE_CHECK(metadata->num_tensor_offsets > 0 &&
-                 metadata->num_tensor_offsets <= NVTE_MAX_GROUPED_SPLIT_TENSOR_OFFSETS,
-             "num_tensor_offsets must be in [1, ", NVTE_MAX_GROUPED_SPLIT_TENSOR_OFFSETS, "].");
-
-  const auto *first_dims_tensor = convertNVTETensorCheck(metadata->first_dims);
-  const auto *first_dims_i64_tensor = convertNVTETensorCheck(metadata->first_dims_i64);
-  const auto *base_offsets_tensor = convertNVTETensorCheck(metadata->base_offsets);
-  const auto *split_points_tensor = convertNVTETensorCheck(metadata->split_points);
-  const auto first_dims_dtype = first_dims_tensor->dtype();
-  const auto num_tensors = first_dims_tensor->numel();
-  const auto offsets_numel = num_tensors + 1;
-  const auto is_tensor = [](const Tensor *tensor, DType dtype, size_t numel) {
-    return tensor->dim() == 1 && tensor->dtype() == dtype && tensor->numel() == numel;
-  };
-
-  NVTE_CHECK(num_tensors > 0 && first_dims_tensor->dim() == 1 &&
-                  (first_dims_dtype == DType::kInt32 || first_dims_dtype == DType::kInt64) &&
-                  is_tensor(first_dims_i64_tensor, DType::kInt64, num_tensors) &&
-                  is_tensor(base_offsets_tensor, DType::kInt64, offsets_numel) &&
-                  is_tensor(split_points_tensor, DType::kInt32, num_tensors),
-              "Invalid grouped split metadata. Expected first_dims int32/int64[N], "
-              "first_dims_i64 int64[N], base_offsets int64[N+1], and split_points int32[N].");
-  // split_points is the only int32 output by design: cuDNN grouped GEMM uses
-  // int32 padded split end offsets, while TE grouped tensor offsets are int64.
-
-  const Tensor *tensor_offsets_tensors[NVTE_MAX_GROUPED_SPLIT_TENSOR_OFFSETS] = {};
-  GroupedSplitOffsetArgs offset_args = {};
-  offset_args.num_offset_vectors = metadata->num_tensor_offsets;
-  for (size_t i = 0; i < metadata->num_tensor_offsets; ++i) {
-    tensor_offsets_tensors[i] = convertNVTETensorCheck(metadata->tensor_offsets[i]);
-    offset_args.logical_last_dims[i] = metadata->logical_last_dims[i];
-    NVTE_CHECK(offset_args.logical_last_dims[i] >= 0 &&
-                   is_tensor(tensor_offsets_tensors[i], DType::kInt64, offsets_numel),
-               "Invalid grouped split tensor_offsets[", i,
-               "]. Expected int64[N+1] and a non-negative logical_last_dim.");
-    offset_args.tensor_offsets[i] = static_cast<int64_t *>(tensor_offsets_tensors[i]->data.dptr);
-  }
-
-  switch (first_dims_dtype) {
-    case DType::kInt32:
-      prepare_grouped_splits_kernel<<<1, kThreadsPerBlock, 0, stream>>>(
-          static_cast<const int32_t *>(first_dims_tensor->data.dptr),
-          static_cast<int64_t *>(first_dims_i64_tensor->data.dptr),
-          static_cast<int64_t *>(base_offsets_tensor->data.dptr),
-          static_cast<int32_t *>(split_points_tensor->data.dptr), offset_args, num_tensors);
-      break;
-    case DType::kInt64:
-      prepare_grouped_splits_kernel<<<1, kThreadsPerBlock, 0, stream>>>(
-          static_cast<const int64_t *>(first_dims_tensor->data.dptr),
-          static_cast<int64_t *>(first_dims_i64_tensor->data.dptr),
-          static_cast<int64_t *>(base_offsets_tensor->data.dptr),
-          static_cast<int32_t *>(split_points_tensor->data.dptr), offset_args, num_tensors);
-      break;
-    default:
-      NVTE_ERROR("first_dims must have dtype int32 or int64.");
-  }
-  NVTE_CHECK_CUDA(cudaGetLastError());
+void nvte_multi_splits_to_offsets(NVTETensor split_sizes, const int64_t *stride_list,
+                                  NVTETensor split_sizes_cumsum,
+                                  NVTETensor *split_offsets_list, size_t list_size,
+                                  cudaStream_t stream) {
+  NVTE_API_CALL(nvte_multi_splits_to_offsets);
+  nvte_multi_splits_to_offsets_impl(split_sizes, stride_list, split_sizes_cumsum,
+                                    split_offsets_list, list_size, stream);
 }
 }  // extern "C"
 

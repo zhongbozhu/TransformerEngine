@@ -203,10 +203,10 @@ class TestGroupedTensor:
 
         (
             split_sizes_i64,
-            base_offsets,
             split_points,
+            base_offsets,
             tensor_offsets,
-        ) = tex.prepare_grouped_splits(split_sizes, num_groups, logical_last_dim)
+        ) = tex.prepare_grouped_splits(split_sizes, num_groups, [1, logical_last_dim])
 
         expected_split_sizes = split_sizes.to(device="cuda", dtype=torch.int64)
         expected_base_offsets = torch.cat(
@@ -232,17 +232,16 @@ class TestGroupedTensor:
         assert torch.equal(split_points, expected_split_points)
         assert torch.equal(tensor_offsets, expected_tensor_offsets)
 
-        multi_logical_last_dims = [logical_last_dim, 0, 1, logical_last_dim + 17]
+        multi_logical_last_dims = [1, logical_last_dim, 0, 1, logical_last_dim + 17]
         multi_outputs = tex.prepare_grouped_splits(
             split_sizes,
             num_groups,
             multi_logical_last_dims,
         )
-        assert len(multi_outputs) == 3 + len(multi_logical_last_dims)
+        assert len(multi_outputs) == 2 + len(multi_logical_last_dims)
         assert torch.equal(multi_outputs[0], expected_split_sizes)
-        assert torch.equal(multi_outputs[1], expected_base_offsets)
-        assert torch.equal(multi_outputs[2], expected_split_points)
-        for output, dim in zip(multi_outputs[3:], multi_logical_last_dims):
+        assert torch.equal(multi_outputs[1], expected_split_points)
+        for output, dim in zip(multi_outputs[2:], multi_logical_last_dims):
             assert output.dtype == torch.int64
             assert output.device.type == "cuda"
             assert torch.equal(output, expected_base_offsets * dim)
