@@ -92,10 +92,6 @@ class GroupedLinear(BasicOperation):
         is not set this argument is forced to ``False`` with a warning.
     delay_wgrad_compute : bool, default = ``False``
         Whether to delay weight gradient computation
-    grouped_mlp_backend : {"python", "megacpp"}, default = ``"python"``
-        Backend preference when this layer participates in a grouped MLP
-        fusion. ``"megacpp"`` opts into the experimental C++ grouped MLP
-        fuser while keeping weight-gradient scheduling in Python.
     single_grouped_bias : bool, default = ``False``
         If ``True`` (and ``bias=True``), store all expert biases as one ``GroupedTensor``
         parameter named ``bias`` instead of ``bias0``..``bias{N-1}``.
@@ -128,16 +124,8 @@ class GroupedLinear(BasicOperation):
         single_grouped_bias: bool = False,
         delay_wgrad_compute: bool = False,
         scale_bias: bool = False,
-        grouped_mlp_backend: str = "python",
     ) -> None:
         super().__init__()
-
-        if grouped_mlp_backend not in ("python", "megacpp"):
-            raise ValueError(
-                "grouped_mlp_backend must be either 'python' or 'megacpp' "
-                f"(got {grouped_mlp_backend!r})."
-            )
-        self.grouped_mlp_backend: str = grouped_mlp_backend
 
         self._scale_bias: bool = scale_bias and bias
         if self._scale_bias:

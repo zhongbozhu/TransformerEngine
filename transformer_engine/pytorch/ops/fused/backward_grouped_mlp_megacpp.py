@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 import functools
+import os
 from typing import Optional
 
 import torch
@@ -342,6 +343,8 @@ def fuse_backward_megacpp_ops(
     **unused,  # pylint: disable=unused-argument
 ) -> list[FusibleOperation]:
     """Apply opt-in C++ grouped MLP backward fusion for BF16/FP16."""
+    if not int(os.getenv("NVTE_MEGACPP_GROUPED_LINEAR", "0")):
+        return ops
     if recipe is not None or not BackwardGroupedMLP_MegaCpp.is_supported():
         return ops
 
@@ -357,9 +360,7 @@ def fuse_backward_megacpp_ops(
         ):
             matches_pattern = False
         elif (
-            getattr(window[0], "grouped_mlp_backend", "python") != "megacpp"
-            or getattr(window[2], "grouped_mlp_backend", "python") != "megacpp"
-            or window[0]._scale_bias
+            window[0]._scale_bias
             or window[2]._scale_bias
         ):
             matches_pattern = False
@@ -392,4 +393,7 @@ def fuse_backward_megacpp_ops(
     return out
 
 
+# Explicit env opt-in should win over other BF16/FP16 grouped-MLP fusers. When
+# the env var is unset, this fuser returns the ops unchanged and does not affect
+# lower-priority fusers.
 register_backward_fusion(fuse_backward_megacpp_ops, prepend=True)

@@ -61,6 +61,17 @@ void update_tensor_scale_inv(Tensor *t, cudaStream_t stream) {
 namespace {
 
 constexpr size_t kThreadsPerBlock = 256;
+
+struct GroupedSplitOffsetArgs {
+  // Unused entries must stay null/zero because the struct is passed by value
+  // into the CUDA kernel with a fixed-capacity array.
+  int64_t *tensor_offsets[NVTE_MAX_GROUPED_SPLIT_TENSOR_OFFSETS] = {};
+  int64_t logical_last_dims[NVTE_MAX_GROUPED_SPLIT_TENSOR_OFFSETS] = {};
+  // Number of offset vectors to generate, not the number of grouped tensors.
+  // The grouped tensor count is the kernel's separate `num_tensors` argument.
+  size_t num_offset_vectors = 0;
+};
+
 template <typename TVectorized>
 __global__ void __launch_bounds__(kThreadsPerBlock)
     memset_kernel(void *__restrict__ ptr, int value, size_t size_in_bytes) {
@@ -135,25 +146,16 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
                                   int64_t *__restrict__ first_dims_i64,
                                   int64_t *__restrict__ base_offsets,
                                   int32_t *__restrict__ split_points,
-                                  int64_t *__restrict__ tensor_offsets0,
-                                  int64_t logical_last_dim0,
-                                  int64_t *__restrict__ tensor_offsets1,
-                                  int64_t logical_last_dim1,
-                                  int64_t *__restrict__ tensor_offsets2,
-                                  int64_t logical_last_dim2,
-                                  int64_t *__restrict__ tensor_offsets3,
-                                  int64_t logical_last_dim3, size_t num_tensor_offsets,
-                                  size_t num_tensors) {
+                                  GroupedSplitOffsetArgs offset_args, size_t num_tensors) {
   __shared__ int64_t block_scan[kThreadsPerBlock];
   __shared__ int64_t chunk_prefix;
 
   const size_t tid = threadIdx.x;
   if (tid == 0) {
     base_offsets[0] = 0;
-    if (num_tensor_offsets > 0) tensor_offsets0[0] = 0;
-    if (num_tensor_offsets > 1) tensor_offsets1[0] = 0;
-    if (num_tensor_offsets > 2) tensor_offsets2[0] = 0;
-    if (num_tensor_offsets > 3) tensor_offsets3[0] = 0;
+    for (size_t i = 0; i < offset_args.num_offset_vectors; ++i) {
+      offset_args.tensor_offsets[i][0] = 0;
+    }
     chunk_prefix = 0;
   }
   __syncthreads();
@@ -182,10 +184,9 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
       // cuDNN grouped GEMM expects padded split end offsets as int32.  TE
       // GroupedTensor metadata keeps the full int64 base_offsets/tensor_offsets.
       split_points[idx] = static_cast<int32_t>(prefix);
-      if (num_tensor_offsets > 0) tensor_offsets0[idx + 1] = prefix * logical_last_dim0;
-      if (num_tensor_offsets > 1) tensor_offsets1[idx + 1] = prefix * logical_last_dim1;
-      if (num_tensor_offsets > 2) tensor_offsets2[idx + 1] = prefix * logical_last_dim2;
-      if (num_tensor_offsets > 3) tensor_offsets3[idx + 1] = prefix * logical_last_dim3;
+      for (size_t i = 0; i < offset_args.num_offset_vectors; ++i) {
+        offset_args.tensor_offsets[i][idx + 1] = prefix * offset_args.logical_last_dims[i];
+      }
     }
     __syncthreads();
 
@@ -269,16 +270,16 @@ void nvte_prepare_grouped_splits(const NVTEGroupedSplitMetadata *metadata, cudaS
   // int32 padded split end offsets, while TE grouped tensor offsets are int64.
 
   const Tensor *tensor_offsets_tensors[NVTE_MAX_GROUPED_SPLIT_TENSOR_OFFSETS] = {};
-  int64_t *tensor_offsets_ptrs[NVTE_MAX_GROUPED_SPLIT_TENSOR_OFFSETS] = {};
-  int64_t logical_last_dims[NVTE_MAX_GROUPED_SPLIT_TENSOR_OFFSETS] = {};
+  GroupedSplitOffsetArgs offset_args = {};
+  offset_args.num_offset_vectors = metadata->num_tensor_offsets;
   for (size_t i = 0; i < metadata->num_tensor_offsets; ++i) {
     tensor_offsets_tensors[i] = convertNVTETensorCheck(metadata->tensor_offsets[i]);
-    logical_last_dims[i] = metadata->logical_last_dims[i];
-    NVTE_CHECK(logical_last_dims[i] >= 0 &&
+    offset_args.logical_last_dims[i] = metadata->logical_last_dims[i];
+    NVTE_CHECK(offset_args.logical_last_dims[i] >= 0 &&
                    is_tensor(tensor_offsets_tensors[i], DType::kInt64, offsets_numel),
                "Invalid grouped split tensor_offsets[", i,
                "]. Expected int64[N+1] and a non-negative logical_last_dim.");
-    tensor_offsets_ptrs[i] = static_cast<int64_t *>(tensor_offsets_tensors[i]->data.dptr);
+    offset_args.tensor_offsets[i] = static_cast<int64_t *>(tensor_offsets_tensors[i]->data.dptr);
   }
 
   switch (first_dims_dtype) {
@@ -287,20 +288,14 @@ void nvte_prepare_grouped_splits(const NVTEGroupedSplitMetadata *metadata, cudaS
           static_cast<const int32_t *>(first_dims_tensor->data.dptr),
           static_cast<int64_t *>(first_dims_i64_tensor->data.dptr),
           static_cast<int64_t *>(base_offsets_tensor->data.dptr),
-          static_cast<int32_t *>(split_points_tensor->data.dptr), tensor_offsets_ptrs[0],
-          logical_last_dims[0], tensor_offsets_ptrs[1], logical_last_dims[1],
-          tensor_offsets_ptrs[2], logical_last_dims[2], tensor_offsets_ptrs[3],
-          logical_last_dims[3], metadata->num_tensor_offsets, num_tensors);
+          static_cast<int32_t *>(split_points_tensor->data.dptr), offset_args, num_tensors);
       break;
     case DType::kInt64:
       prepare_grouped_splits_kernel<<<1, kThreadsPerBlock, 0, stream>>>(
           static_cast<const int64_t *>(first_dims_tensor->data.dptr),
           static_cast<int64_t *>(first_dims_i64_tensor->data.dptr),
           static_cast<int64_t *>(base_offsets_tensor->data.dptr),
-          static_cast<int32_t *>(split_points_tensor->data.dptr), tensor_offsets_ptrs[0],
-          logical_last_dims[0], tensor_offsets_ptrs[1], logical_last_dims[1],
-          tensor_offsets_ptrs[2], logical_last_dims[2], tensor_offsets_ptrs[3],
-          logical_last_dims[3], metadata->num_tensor_offsets, num_tensors);
+          static_cast<int32_t *>(split_points_tensor->data.dptr), offset_args, num_tensors);
       break;
     default:
       NVTE_ERROR("first_dims must have dtype int32 or int64.");

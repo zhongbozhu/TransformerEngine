@@ -509,6 +509,11 @@ void nvte_memset(void *ptr, int value, size_t size_in_bytes, cudaStream_t stream
 void nvte_splits_to_offsets(const int64_t *first_dims, int64_t *output, size_t num_tensors,
                             int64_t logical_last_dim, cudaStream_t stream);
 
+/* Fixed small capacity for offset vectors produced by nvte_prepare_grouped_splits.
+ * This keeps the primitive to one CUDA kernel launch without allocating/copying
+ * a device-side pointer array. Four covers the current grouped MLP call sites:
+ * input, FC1 output, FC2 input, and final output offsets.
+ */
 enum { NVTE_MAX_GROUPED_SPLIT_TENSOR_OFFSETS = 4 };
 
 /*! \struct NVTEGroupedSplitMetadata
