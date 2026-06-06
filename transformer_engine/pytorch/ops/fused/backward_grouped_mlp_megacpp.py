@@ -324,11 +324,15 @@ class BackwardGroupedMLP_MegaCpp(FusedOperation):
             else (None,)
         )
 
-        return grad_input, [fc1_grad_params, (), fc2_grad_params], [
-            (None,),
-            activation_grad_extra,
-            (None,),
-        ]
+        return (
+            grad_input,
+            [fc1_grad_params, (), fc2_grad_params],
+            [
+                (None,),
+                activation_grad_extra,
+                (None,),
+            ],
+        )
 
 
 def fuse_backward_megacpp_ops(
@@ -349,15 +353,9 @@ def fuse_backward_megacpp_ops(
     window, ops = ops[:3], ops[3:]
     while len(window) == 3:
         matches_pattern = True
-        if not (
-            isinstance(window[0], GroupedLinear)
-            and isinstance(window[2], GroupedLinear)
-        ):
+        if not (isinstance(window[0], GroupedLinear) and isinstance(window[2], GroupedLinear)):
             matches_pattern = False
-        elif (
-            window[0]._scale_bias
-            or window[2]._scale_bias
-        ):
+        elif window[0]._scale_bias or window[2]._scale_bias:
             matches_pattern = False
         else:
             try:

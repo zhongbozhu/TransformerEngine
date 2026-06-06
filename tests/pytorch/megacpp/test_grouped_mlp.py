@@ -464,10 +464,10 @@ def test_megacpp_grouped_mlp_delay_wgrad_raises(monkeypatch):
         glu_interleave_size=None,
         single_grouped_param=False,
     )
-    x = torch.randn(total_tokens, _HIDDEN_SIZE, device="cuda", dtype=torch.bfloat16).requires_grad_()
-    act_scales = torch.rand(
-        total_tokens, device="cuda", dtype=torch.bfloat16
+    x = torch.randn(
+        total_tokens, _HIDDEN_SIZE, device="cuda", dtype=torch.bfloat16
     ).requires_grad_()
+    act_scales = torch.rand(total_tokens, device="cuda", dtype=torch.bfloat16).requires_grad_()
     dy = torch.randn(total_tokens, _HIDDEN_SIZE, device="cuda", dtype=torch.bfloat16)
 
     monkeypatch.setenv("NVTE_MEGACPP_GROUPED_LINEAR", "1")

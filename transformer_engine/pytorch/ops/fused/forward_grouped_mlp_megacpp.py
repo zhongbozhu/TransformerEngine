@@ -280,8 +280,12 @@ class ForwardGroupedMLP_MegaCpp(FusedOperation):
             x._do_not_clear = True
 
         if requires_grad:
-            fc1_saved_weights = [fc1_weights] if isinstance(fc1_weights, torch.Tensor) else fc1_weights
-            fc2_saved_weights = [fc2_weights] if isinstance(fc2_weights, torch.Tensor) else fc2_weights
+            fc1_saved_weights = (
+                [fc1_weights] if isinstance(fc1_weights, torch.Tensor) else fc1_weights
+            )
+            fc2_saved_weights = (
+                [fc2_weights] if isinstance(fc2_weights, torch.Tensor) else fc2_weights
+            )
 
             fc1_ctx.save_for_backward(
                 split_sizes_i64,
@@ -338,15 +342,9 @@ def fuse_forward_megacpp_ops(
     window, ops = ops[:3], ops[3:]
     while len(window) == 3:
         matches_pattern = True
-        if not (
-            isinstance(window[0], GroupedLinear)
-            and isinstance(window[2], GroupedLinear)
-        ):
+        if not (isinstance(window[0], GroupedLinear) and isinstance(window[2], GroupedLinear)):
             matches_pattern = False
-        elif (
-            window[0]._scale_bias
-            or window[2]._scale_bias
-        ):
+        elif window[0]._scale_bias or window[2]._scale_bias:
             matches_pattern = False
         else:
             try:

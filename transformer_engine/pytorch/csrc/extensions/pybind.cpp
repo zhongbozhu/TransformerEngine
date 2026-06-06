@@ -357,15 +357,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("te_general_grouped_gemm_for_discrete_out",
         &transformer_engine::pytorch::te_general_grouped_gemm_for_discrete_out,
         "Grouped GEMM for discrete output list");
-  m.def("megacpp_grouped_mlp_forward",
-        &transformer_engine::pytorch::megacpp_grouped_mlp_forward,
+  m.def("megacpp_grouped_mlp_forward", &transformer_engine::pytorch::megacpp_grouped_mlp_forward,
         "Mega C++ grouped MLP forward", py::arg("input"), py::arg("split_sizes"),
         py::arg("fc1_weight"), py::arg("fc1_bias"), py::arg("fc2_weight"), py::arg("fc2_bias"),
         py::arg("act_scales"), py::arg("activation"), py::arg("glu_interleave_size"),
         py::arg("activation_limit") = 0.0, py::arg("activation_alpha") = 0.0,
         py::arg("activation_glu_linear_offset") = 0.0);
-  m.def("megacpp_grouped_mlp_backward",
-        &transformer_engine::pytorch::megacpp_grouped_mlp_backward,
+  m.def("megacpp_grouped_mlp_backward", &transformer_engine::pytorch::megacpp_grouped_mlp_backward,
         "Mega C++ grouped MLP backward", py::arg("grad_output"), py::arg("split_sizes"),
         py::arg("x_offsets"), py::arg("fc1_offsets"), py::arg("fc2_offsets"),
         py::arg("fc2_dy_offsets"), py::arg("base_offsets"), py::arg("x"),
