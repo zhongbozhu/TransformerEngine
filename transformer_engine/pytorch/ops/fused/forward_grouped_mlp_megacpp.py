@@ -13,6 +13,10 @@ from typing import Any, NamedTuple, Optional
 import torch
 
 import transformer_engine_torch as tex
+from ...cpp_extensions.gemm import (
+    get_cublas_workspace_size_bytes,
+    get_grouped_gemm_setup_workspace_size,
+)
 from ...quantization import Recipe
 from ...tensor import Quantizer
 from ...utils import get_device_compute_capability
@@ -40,6 +44,40 @@ def _megacpp_supports_recipe(recipe: Optional[Recipe]) -> bool:
     if recipe.mxfp8() or recipe.nvfp4():
         return False
     return False
+
+
+@functools.lru_cache(maxsize=None)
+def _cached_grouped_gemm_scratch(
+    num_groups: int,
+    device_index: int,
+    _stream_handle: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Cached cuBLAS grouped GEMM scratch for one CUDA stream.
+
+    ``_stream_handle`` is intentionally part of the cache key. The workspace is
+    reused without recording extra streams, so it must not be shared by
+    concurrent streams.
+    """
+    device = torch.device("cuda", device_index)
+    with torch.cuda.device(device):
+        setup_size = get_grouped_gemm_setup_workspace_size(num_groups)
+        cublas_size = get_cublas_workspace_size_bytes()
+    return (
+        torch.ones(num_groups, dtype=torch.float32, device=device),
+        torch.zeros(num_groups, dtype=torch.float32, device=device),
+        torch.empty(setup_size, dtype=torch.uint8, device=device),
+        torch.empty(cublas_size, dtype=torch.uint8, device=device),
+    )
+
+
+def _grouped_gemm_scratch(
+    num_groups: int,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return cached GEMM resources for the current stream on ``device``."""
+    device_index = torch.cuda.current_device() if device.index is None else device.index
+    stream_handle = int(torch.cuda.current_stream(device_index).cuda_stream)
+    return _cached_grouped_gemm_scratch(num_groups, device_index, stream_handle)
 
 
 class _MegaCppActivationConfig(NamedTuple):
@@ -250,6 +288,7 @@ class ForwardGroupedMLP_MegaCpp(FusedOperation):
             dtype,
             input_requires_grad=input_requires_grad,
         )
+        gemm_scratch = _grouped_gemm_scratch(num_groups, input_.device)
         (
             fc2_out,
             x,
@@ -262,7 +301,8 @@ class ForwardGroupedMLP_MegaCpp(FusedOperation):
             fc1_activation_input,
             fc2_x,
         ) = tex.megacpp_grouped_mlp_forward(
-            input_.to(dtype=dtype),
+            input_,
+            dtype,
             split_sizes,
             fc1_weights,
             _megacpp_bias_arg(fc1_op, dtype),
@@ -274,6 +314,7 @@ class ForwardGroupedMLP_MegaCpp(FusedOperation):
             activation_config.limit,
             activation_config.alpha,
             activation_config.glu_linear_offset,
+            gemm_scratch,
         )
 
         if x.data_ptr() == input_.data_ptr():

@@ -9,9 +9,11 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#include <array>
 #include <optional>
 #include <string>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 #include "../extensions.h"
@@ -56,10 +58,13 @@ size_t num_groups_from_prepared_split_sizes(const at::Tensor &split_sizes,
   return static_cast<size_t>(split_sizes.numel());
 }
 
-GroupedTensorWrapper make_grouped_tensor(at::Tensor data, const at::Tensor &prepared_split_sizes,
+GroupedTensorWrapper make_grouped_tensor(const at::Tensor &data,
+                                         const at::Tensor &prepared_split_sizes,
                                          const at::Tensor &tensor_offsets,
                                          int64_t logical_last_dim) {
   const auto num_groups = static_cast<size_t>(prepared_split_sizes.numel());
+  NVTE_CHECK(data.numel() % logical_last_dim == 0,
+             "Grouped tensor storage is not divisible by logical last dimension.");
   const auto total_tokens = static_cast<size_t>(data.numel() / logical_last_dim);
   auto grouped = GroupedTensorWrapper(
       num_groups, std::vector<size_t>{total_tokens, static_cast<size_t>(logical_last_dim)});
@@ -169,6 +174,36 @@ int grouped_gemm_math_sm_count(const c10::Device &device) {
   return sm_count - transformer_engine::getenv<int>("NVTE_EXT_MARGIN_SM", sm_count);
 }
 
+std::array<at::Tensor, 4> grouped_gemm_scratch_from_arg(py::handle scratch,
+                                                        const c10::Device &device,
+                                                        size_t num_groups) {
+  const int64_t num_groups_i64 = static_cast<int64_t>(num_groups);
+  const int64_t setup_size =
+      static_cast<int64_t>(nvte_get_grouped_gemm_setup_workspace_size(num_groups));
+
+  if (is_none(scratch)) {
+    return {
+        at::ones({num_groups_i64}, at::device(device).dtype(at::kFloat)),
+        at::zeros({num_groups_i64}, at::device(device).dtype(at::kFloat)),
+        at::empty({setup_size}, at::device(device).dtype(at::kByte)),
+        at::empty({kGroupedGemmCublasWorkspaceSize}, at::device(device).dtype(at::kByte)),
+    };
+  }
+
+  NVTE_CHECK(py::isinstance<py::tuple>(scratch) || py::isinstance<py::list>(scratch),
+             "megacpp grouped MLP GEMM scratch must be None or a 4-tensor tuple/list.");
+  auto seq = py::reinterpret_borrow<py::sequence>(scratch);
+  NVTE_CHECK(seq.size() == 4, "megacpp grouped MLP GEMM scratch must have 4 tensors.");
+
+  std::array<at::Tensor, 4> tensors = {
+      seq[0].cast<at::Tensor>(),
+      seq[1].cast<at::Tensor>(),
+      seq[2].cast<at::Tensor>(),
+      seq[3].cast<at::Tensor>(),
+  };
+  return tensors;
+}
+
 struct GroupedGemmResources {
   c10::Device device;
   size_t num_groups;
@@ -184,17 +219,15 @@ struct GroupedGemmResources {
   TensorWrapper te_cublas;
   std::optional<GroupedMatmulConfigWrapper> config;
 
-  GroupedGemmResources(const c10::Device &device_, size_t num_groups_)
+  GroupedGemmResources(const c10::Device &device_, size_t num_groups_,
+                       std::array<at::Tensor, 4> scratch)
       : device(device_),
         num_groups(num_groups_),
-        alpha(at::ones({static_cast<int64_t>(num_groups_)}, at::device(device).dtype(at::kFloat))),
-        beta_zero(
-            at::zeros({static_cast<int64_t>(num_groups_)}, at::device(device).dtype(at::kFloat))),
+        alpha(std::move(scratch[0])),
+        beta_zero(std::move(scratch[1])),
         beta_one(alpha),
-        setup(at::empty(
-            {static_cast<int64_t>(nvte_get_grouped_gemm_setup_workspace_size(num_groups_))},
-            at::device(device).dtype(at::kByte))),
-        cublas(at::empty({kGroupedGemmCublasWorkspaceSize}, at::device(device).dtype(at::kByte))),
+        setup(std::move(scratch[2])),
+        cublas(std::move(scratch[3])),
         te_alpha(makeTransformerEngineTensor(alpha)),
         te_beta_zero(makeTransformerEngineTensor(beta_zero)),
         te_beta_one(makeTransformerEngineTensor(beta_one)),
@@ -204,12 +237,10 @@ struct GroupedGemmResources {
         te_cublas(makeTransformerEngineTensor(
             cublas.data_ptr(), std::vector<size_t>{static_cast<size_t>(cublas.numel())},
             DType::kByte)) {
-    // These scratch tensors are intentionally local to one megacpp call. They
-    // are safe after this CPU function returns because every current cuBLAS
-    // grouped GEMM below is enqueued on at::cuda::getCurrentCUDAStream(), so
-    // PyTorch's caching allocator observes same-stream allocation/release
-    // ordering. If a future backend uses auxiliary streams, this helper must
-    // either record those streams on the tensors or extend resource lifetime.
+    // These scratch tensors may be cached by Python per CUDA stream. Every
+    // current megacpp grouped GEMM below is enqueued on at::cuda::getCurrentCUDAStream(),
+    // so same-stream ordering protects workspace reuse. If a future backend
+    // uses auxiliary streams, cache keys or stream recording must be revisited.
     const int math_sm_count = grouped_gemm_math_sm_count(device);
     if (math_sm_count > 0) {
       config.emplace();
@@ -225,11 +256,13 @@ struct GroupedGemmResources {
 };
 
 GroupedGemmResources make_grouped_mlp_backend_resources(const c10::Device &device,
-                                                        size_t num_groups) {
+                                                        size_t num_groups,
+                                                        py::handle scratch) {
   // Keep the backend resource policy private to megacpp. Today this is cuBLAS
   // grouped GEMM scratch; future backends can change this helper without
   // changing the Python or pybind contract.
-  return GroupedGemmResources(device, num_groups);
+  return GroupedGemmResources(device, num_groups,
+                              grouped_gemm_scratch_from_arg(scratch, device, num_groups));
 }
 
 void grouped_gemm(GroupedTensorWrapper *A, bool transa, GroupedTensorWrapper *B, bool transb,
@@ -262,7 +295,7 @@ std::vector<at::Tensor> output_tensor_list_from_arg(py::handle arg, size_t num_g
   for (size_t i = 0; i < num_groups; ++i) {
     auto tensor = seq[i].cast<at::Tensor>();
     NVTE_CHECK(tensor.is_cuda(), name, " tensors must be CUDA tensors.");
-    // Do not require tensor.scalar_type() == compute dtype. Caller-owned
+    // Do not require tensor.scalar_type() == dtype. Caller-owned
     // main_grad buffers are allocated by Megatron and may be FP32 even when TE
     // grouped MLP compute is BF16.
     NVTE_CHECK(tensor.dim() == 2, name, " tensors must be rank-2 wgrad buffers.");
@@ -294,7 +327,8 @@ WgradOutput wgrad_output_from_arg(py::handle arg, bool compute_wgrad, size_t num
     // allocation. Single grouped weight keeps this packed as [G, N, K];
     // discrete weights split the same packed allocation into per-expert views.
     out.packed =
-        at::empty({static_cast<int64_t>(num_groups), rows, cols}, at::device(device).dtype(dtype));
+        at::empty({static_cast<int64_t>(num_groups), rows, cols},
+                  at::device(device).dtype(dtype));
     out.owns_storage = true;
     out.is_grouped = prefer_grouped_output;
     if (out.is_grouped) {
@@ -312,8 +346,8 @@ WgradOutput wgrad_output_from_arg(py::handle arg, bool compute_wgrad, size_t num
     // should not receive a newly allocated grad tensor from this helper.
     out.packed = arg.cast<at::Tensor>();
     NVTE_CHECK(out.packed.is_cuda(), name, " must be a CUDA tensor.");
-    // Do not require out.packed.scalar_type() == compute dtype. Caller-owned
-    // main_grad buffers keep the dtype chosen by Megatron's grad-buffer config.
+    // Do not require out.packed.scalar_type() == dtype. Caller-owned
+    // main_grad buffers keep the precision chosen by Megatron's grad-buffer config.
     NVTE_CHECK(out.packed.dim() == 3, name, " must have shape [num_groups, rows, cols].");
     NVTE_CHECK(static_cast<size_t>(out.packed.size(0)) == num_groups, name,
                " first dimension must be ", num_groups, ".");
@@ -355,12 +389,14 @@ void grouped_gemm_fwd_dgrad(GroupedWeightArg *weights, bool trans_weight,
 }
 
 std::vector<at::Tensor> grouped_gemm_wgrad(GroupedTensorWrapper *x, GroupedTensorWrapper *dy,
-                                           py::handle output, bool compute_wgrad, bool accumulate,
-                                           GroupedGemmResources *resources, at::ScalarType dtype,
-                                           int64_t rows, int64_t cols, const std::string &name,
-                                           bool prefer_grouped_output) {
-  auto prepared = wgrad_output_from_arg(output, compute_wgrad, resources->num_groups, dtype,
-                                        resources->device, rows, cols, name, prefer_grouped_output);
+                                            py::handle output, bool compute_wgrad, bool accumulate,
+                                            GroupedGemmResources *resources,
+                                            at::ScalarType dtype, int64_t rows,
+                                            int64_t cols, const std::string &name,
+                                            bool prefer_grouped_output) {
+  auto prepared =
+      wgrad_output_from_arg(output, compute_wgrad, resources->num_groups, dtype,
+                            resources->device, rows, cols, name, prefer_grouped_output);
   NVTE_CHECK(!(prepared.owns_storage && accumulate), name,
              " cannot accumulate into a newly allocated wgrad buffer.");
   std::vector<at::Tensor> returned_wgrads;
@@ -399,11 +435,11 @@ std::vector<at::Tensor> grouped_gemm_wgrad(GroupedTensorWrapper *x, GroupedTenso
 }
 
 GroupedTensorWrapper make_grouped_bias(const at::Tensor &bias, size_t num_groups,
-                                       at::ScalarType dtype, int64_t out_features) {
+                                       at::ScalarType bias_dtype, int64_t out_features) {
   NVTE_CHECK(bias.defined(), "Bias tensor must be defined.");
   auto grouped = GroupedTensorWrapper(
       num_groups, std::vector<size_t>{num_groups, static_cast<size_t>(out_features)});
-  grouped.set_rowwise_data(bias.data_ptr(), GetTransformerEngineDType(dtype),
+  grouped.set_rowwise_data(bias.data_ptr(), GetTransformerEngineDType(bias_dtype),
                            tensor_shape_1d(bias));
   return grouped;
 }
@@ -606,18 +642,25 @@ ActivationBackwardResult grouped_mlp_activation_backward(
 }  // namespace
 
 std::vector<at::Tensor> megacpp_grouped_mlp_forward(
-    const at::Tensor &input, const at::Tensor &split_sizes, py::handle fc1_weight,
+    const at::Tensor &input, at::ScalarType act_dtype, const at::Tensor &split_sizes,
+    py::handle fc1_weight,
     py::handle fc1_bias, py::handle fc2_weight, py::handle fc2_bias,
     const std::optional<at::Tensor> &act_scales, const std::string &activation,
     int64_t glu_interleave_size, double activation_limit, double activation_alpha,
-    double activation_glu_linear_offset) {
+    double activation_glu_linear_offset, py::handle gemm_scratch) {
   NVTE_CHECK(input.is_cuda(), "megacpp_grouped_mlp_forward requires CUDA input.");
   at::cuda::CUDAGuard device_guard(input.device());
+
+  // act_dtype is the requested activation/GEMM input dtype. The incoming
+  // tensor may have a different dtype, so canonicalize it once at the API
+  // boundary and use this tensor for all downstream grouped GEMMs.
+  const auto dtype = act_dtype;
+  auto x = maybe_cast_dtype(input, dtype);
+  check_contiguous(x, "input");
 
   const auto num_groups = static_cast<size_t>(split_sizes.numel());
   NVTE_CHECK(num_groups > 0, "megacpp grouped MLP requires at least one group.");
 
-  const auto dtype = input.scalar_type();
   NVTE_CHECK(dtype == at::kBFloat16 || dtype == at::kHalf,
              "megacpp grouped MLP currently supports BF16/FP16 only.");
 
@@ -636,9 +679,8 @@ std::vector<at::Tensor> megacpp_grouped_mlp_forward(
   auto fc2_bias_tensor =
       packed_bias_from_arg(fc2_bias, num_groups, dtype, fc2_out_features, "fc2_bias");
 
-  auto x = maybe_cast_dtype(input, dtype);
-  check_contiguous(x, "input");
-  x = x.view({-1, in_features});
+  NVTE_CHECK(x.numel() % in_features == 0, "input last dimension is incompatible with FC1.");
+  const int64_t total_tokens = x.numel() / in_features;
   auto [split_sizes_i64, split_offsets] = splits_to_offsets_multi(
       split_sizes, x.device(),
       std::vector<int64_t>{1, in_features, fc1_out_features, fc2_in_features, fc2_out_features},
@@ -653,13 +695,12 @@ std::vector<at::Tensor> megacpp_grouped_mlp_forward(
   auto fc1_offsets = split_offsets[2];
   auto fc2_offsets = split_offsets[3];
   auto output_offsets = split_offsets[4];
-  const int64_t total_tokens = x.size(0);
-  auto gemm_resources = make_grouped_mlp_backend_resources(x.device(), num_groups);
+  auto gemm_resources = make_grouped_mlp_backend_resources(x.device(), num_groups, gemm_scratch);
 
   auto fc1_preact = at::empty({total_tokens, fc1_out_features}, x.options());
-  auto grouped_x = make_grouped_tensor(x.view({-1}), split_sizes_i64, x_offsets, in_features);
+  auto grouped_x = make_grouped_tensor(x, split_sizes_i64, x_offsets, in_features);
   auto grouped_fc1_preact =
-      make_grouped_tensor(fc1_preact.view({-1}), split_sizes_i64, fc1_offsets, fc1_out_features);
+      make_grouped_tensor(fc1_preact, split_sizes_i64, fc1_offsets, fc1_out_features);
   grouped_gemm_fwd_dgrad(&fc1_weights, true, &grouped_x, false, &grouped_fc1_preact,
                          &gemm_resources);
   add_grouped_bias(&grouped_fc1_preact, fc1_bias_tensor, num_groups, dtype, fc1_out_features);
@@ -671,11 +712,10 @@ std::vector<at::Tensor> megacpp_grouped_mlp_forward(
   std::vector<int64_t> out_shape = input.sizes().vec();
   out_shape.back() = fc2_out_features;
   auto output = at::empty(out_shape, x.options());
-  auto output_2d = output.view({-1, fc2_out_features});
   auto grouped_fc2_x =
-      make_grouped_tensor(fc2_x.view({-1}), split_sizes_i64, fc2_offsets, fc2_in_features);
+      make_grouped_tensor(fc2_x, split_sizes_i64, fc2_offsets, fc2_in_features);
   auto grouped_output =
-      make_grouped_tensor(output_2d.view({-1}), split_sizes_i64, output_offsets, fc2_out_features);
+      make_grouped_tensor(output, split_sizes_i64, output_offsets, fc2_out_features);
   grouped_gemm_fwd_dgrad(&fc2_weights, true, &grouped_fc2_x, false, &grouped_output,
                          &gemm_resources);
   add_grouped_bias(&grouped_output, fc2_bias_tensor, num_groups, dtype, fc2_out_features);
@@ -685,7 +725,8 @@ std::vector<at::Tensor> megacpp_grouped_mlp_forward(
 }
 
 py::tuple megacpp_grouped_mlp_backward(
-    const at::Tensor &grad_output, const at::Tensor &split_sizes, const at::Tensor &x_offsets,
+    const at::Tensor &grad_output, at::ScalarType act_dtype, const at::Tensor &split_sizes,
+    const at::Tensor &x_offsets,
     const at::Tensor &fc1_offsets, const at::Tensor &fc2_offsets, const at::Tensor &fc2_dy_offsets,
     const at::Tensor &base_offsets, const at::Tensor &x, const at::Tensor &fc1_activation_input,
     const at::Tensor &fc2_x, const std::optional<at::Tensor> &act_scales, py::handle fc1_weight,
@@ -693,13 +734,19 @@ py::tuple megacpp_grouped_mlp_backward(
     bool fc1_accumulate_wgrad, py::handle fc2_wgrad_output, bool fc2_compute_wgrad,
     bool fc2_accumulate_wgrad, const std::string &activation, int64_t glu_interleave_size,
     double activation_limit, double activation_alpha, double activation_glu_linear_offset,
-    bool act_scales_requires_grad, bool input_requires_grad) {
+    bool act_scales_requires_grad, bool input_requires_grad, py::handle gemm_scratch) {
   (void)base_offsets;
   NVTE_CHECK(grad_output.is_cuda(), "megacpp_grouped_mlp_backward requires CUDA grad_output.");
   at::cuda::CUDAGuard device_guard(grad_output.device());
 
+  // act_dtype is the requested grouped-MLP compute dtype. Backward receives
+  // autograd's grad_output as-is, so canonicalize it here instead of requiring
+  // a Python-side aten::to before entering C++.
+  const auto dtype = act_dtype;
+  auto dy = maybe_cast_dtype(grad_output, dtype);
+  check_contiguous(dy, "grad_output");
+
   const auto num_groups = num_groups_from_prepared_split_sizes(split_sizes, grad_output.device());
-  const auto dtype = grad_output.scalar_type();
   auto fc1_weights = weight_arg_from_py(fc1_weight, num_groups, dtype, "fc1_weight");
   auto fc2_weights = weight_arg_from_py(fc2_weight, num_groups, dtype, "fc2_weight");
 
@@ -708,30 +755,28 @@ py::tuple megacpp_grouped_mlp_backward(
   const int64_t fc2_out_features = fc2_weights.rows;
   const int64_t fc2_in_features = fc2_weights.cols;
 
-  auto dy = maybe_cast_dtype(grad_output, dtype);
-  check_contiguous(dy, "grad_output");
-  dy = dy.view({-1, fc2_out_features});
-  const int64_t total_tokens = dy.size(0);
-  auto gemm_resources = make_grouped_mlp_backend_resources(grad_output.device(), num_groups);
+  NVTE_CHECK(dy.numel() % fc2_out_features == 0,
+             "grad_output last dimension is incompatible with FC2.");
+  const int64_t total_tokens = dy.numel() / fc2_out_features;
+  auto gemm_resources =
+      make_grouped_mlp_backend_resources(grad_output.device(), num_groups, gemm_scratch);
 
-  auto grouped_dy =
-      make_grouped_tensor(dy.view({-1}), split_sizes, fc2_dy_offsets, fc2_out_features);
+  auto grouped_dy = make_grouped_tensor(dy, split_sizes, fc2_dy_offsets, fc2_out_features);
   std::vector<at::Tensor> fc2_wgrads;
   if (fc2_compute_wgrad) {
     auto fc2_x_for_wgrad = maybe_cast_dtype(fc2_x, dtype);
     check_contiguous(fc2_x_for_wgrad, "fc2_x");
-    fc2_x_for_wgrad = fc2_x_for_wgrad.view({-1, fc2_in_features});
     auto grouped_fc2_x_for_wgrad =
-        make_grouped_tensor(fc2_x_for_wgrad.view({-1}), split_sizes, fc2_offsets, fc2_in_features);
+        make_grouped_tensor(fc2_x_for_wgrad, split_sizes, fc2_offsets, fc2_in_features);
     fc2_wgrads = grouped_gemm_wgrad(&grouped_fc2_x_for_wgrad, &grouped_dy, fc2_wgrad_output,
-                                    fc2_compute_wgrad, fc2_accumulate_wgrad, &gemm_resources, dtype,
-                                    fc2_out_features, fc2_in_features, "fc2_wgrad_output",
+                                    fc2_compute_wgrad, fc2_accumulate_wgrad, &gemm_resources,
+                                    dtype, fc2_out_features, fc2_in_features, "fc2_wgrad_output",
                                     fc2_weights.is_grouped);
   }
 
   auto fc2_dx = at::empty({total_tokens, fc2_in_features}, dy.options());
   auto grouped_fc2_dx =
-      make_grouped_tensor(fc2_dx.view({-1}), split_sizes, fc2_offsets, fc2_in_features);
+      make_grouped_tensor(fc2_dx, split_sizes, fc2_offsets, fc2_in_features);
   grouped_gemm_fwd_dgrad(&fc2_weights, false, &grouped_dy, false, &grouped_fc2_dx, &gemm_resources);
 
   auto activation_grads = grouped_mlp_activation_backward(
@@ -740,18 +785,17 @@ py::tuple megacpp_grouped_mlp_backward(
   auto fc1_dy = activation_grads.grad_input;
   auto grad_act_scales = activation_grads.grad_act_scales;
   auto grouped_fc1_dy =
-      make_grouped_tensor(fc1_dy.view({-1}), split_sizes, fc1_offsets, fc1_out_features);
+      make_grouped_tensor(fc1_dy, split_sizes, fc1_offsets, fc1_out_features);
 
   std::vector<at::Tensor> fc1_wgrads;
   if (fc1_compute_wgrad) {
     auto x_for_wgrad = maybe_cast_dtype(x, dtype);
     check_contiguous(x_for_wgrad, "x");
-    x_for_wgrad = x_for_wgrad.view({-1, in_features});
     auto grouped_x_for_wgrad =
-        make_grouped_tensor(x_for_wgrad.view({-1}), split_sizes, x_offsets, in_features);
+        make_grouped_tensor(x_for_wgrad, split_sizes, x_offsets, in_features);
     fc1_wgrads = grouped_gemm_wgrad(&grouped_x_for_wgrad, &grouped_fc1_dy, fc1_wgrad_output,
-                                    fc1_compute_wgrad, fc1_accumulate_wgrad, &gemm_resources, dtype,
-                                    fc1_out_features, in_features, "fc1_wgrad_output",
+                                    fc1_compute_wgrad, fc1_accumulate_wgrad, &gemm_resources,
+                                    dtype, fc1_out_features, in_features, "fc1_wgrad_output",
                                     fc1_weights.is_grouped);
   }
 
@@ -760,9 +804,8 @@ py::tuple megacpp_grouped_mlp_backward(
     std::vector<int64_t> grad_input_shape = grad_output.sizes().vec();
     grad_input_shape.back() = in_features;
     grad_input = at::empty(grad_input_shape, dy.options());
-    auto grad_input_2d = grad_input.view({-1, in_features});
     auto grouped_grad_input =
-        make_grouped_tensor(grad_input_2d.view({-1}), split_sizes, x_offsets, in_features);
+        make_grouped_tensor(grad_input, split_sizes, x_offsets, in_features);
     grouped_gemm_fwd_dgrad(&fc1_weights, false, &grouped_fc1_dy, false, &grouped_grad_input,
                            &gemm_resources);
   } else {

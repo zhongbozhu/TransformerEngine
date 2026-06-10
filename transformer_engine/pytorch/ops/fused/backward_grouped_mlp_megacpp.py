@@ -24,6 +24,7 @@ from .._common import (
     view_main_grad_as_grouped_buffer,
 )
 from .forward_grouped_mlp_megacpp import (
+    _grouped_gemm_scratch,
     _megacpp_activation_config,
     _megacpp_enabled,
     _megacpp_supports_recipe,
@@ -235,7 +236,8 @@ class BackwardGroupedMLP_MegaCpp(FusedOperation):
             fc1_owned_weight_grads,
             fc2_owned_weight_grads,
         ) = tex.megacpp_grouped_mlp_backward(
-            grad_output.to(dtype=dtype),
+            grad_output,
+            dtype,
             split_sizes,
             x_offsets,
             fc1_offsets,
@@ -261,6 +263,7 @@ class BackwardGroupedMLP_MegaCpp(FusedOperation):
             activation_config.glu_linear_offset,
             bool(activation_ctx.extra_input_requires_grad),
             bool(fc1_ctx.input_requires_grad),
+            _grouped_gemm_scratch(num_groups, grad_output.device),
         )
         if not fc1_ctx.input_requires_grad:
             grad_input = None
@@ -318,8 +321,9 @@ class BackwardGroupedMLP_MegaCpp(FusedOperation):
         )
         clear_tensor_data(x)
 
+        # d(act_scales) belongs to the extra input, so match act_scales.dtype
         activation_grad_extra = (
-            (grad_act_scales.to(dtype=dtype),)
+            (grad_act_scales.to(dtype=act_scales.dtype),)
             if activation_ctx.extra_input_requires_grad
             else (None,)
         )
