@@ -243,36 +243,33 @@ void grouped_gemm(GroupedTensorWrapper *A, bool transa, GroupedTensorWrapper *B,
 }
 
 std::vector<at::Tensor> output_tensor_list_from_arg(py::handle arg, size_t num_groups,
-                                                    at::ScalarType dtype, const std::string &name) {
+                                                    int64_t rows, int64_t cols,
+                                                    const std::string &name) {
   std::vector<at::Tensor> out;
   if (is_none(arg)) {
     return out;
   }
   out.reserve(num_groups);
-  if (py::isinstance<py::list>(arg) || py::isinstance<py::tuple>(arg)) {
-    auto seq = py::reinterpret_borrow<py::sequence>(arg);
-    NVTE_CHECK(static_cast<size_t>(seq.size()) == num_groups, name, " must have ", num_groups,
-               " tensors.");
-    for (size_t i = 0; i < num_groups; ++i) {
-      auto tensor = seq[i].cast<at::Tensor>();
-      NVTE_CHECK(tensor.is_cuda(), name, " tensors must be CUDA tensors.");
-      NVTE_CHECK(tensor.scalar_type() == dtype, name, " tensors must have the requested dtype.");
-      NVTE_CHECK(tensor.dim() == 2, name, " tensors must be rank-2 wgrad buffers.");
-      check_contiguous(tensor, name);
-      out.emplace_back(tensor);
-    }
-    return out;
-  }
-
-  auto packed = arg.cast<at::Tensor>();
-  NVTE_CHECK(packed.is_cuda(), name, " must be a CUDA tensor.");
-  NVTE_CHECK(packed.scalar_type() == dtype, name, " must have the requested dtype.");
-  NVTE_CHECK(packed.dim() == 3, name, " must have shape [num_groups, rows, cols].");
-  NVTE_CHECK(static_cast<size_t>(packed.size(0)) == num_groups, name, " first dimension must be ",
-             num_groups, ".");
-  check_contiguous(packed, name);
+  // This helper is intentionally only for the discrete-weight external wgrad
+  // path, where Megatron provides one main_grad tensor per expert. The packed
+  // [G, rows, cols] external buffer used by single grouped weight is handled in
+  // wgrad_output_from_arg so it can stay packed and use grouped-tensor GEMM.
+  NVTE_CHECK(py::isinstance<py::list>(arg) || py::isinstance<py::tuple>(arg), name,
+             " must be a list or tuple of wgrad output tensors.");
+  auto seq = py::reinterpret_borrow<py::sequence>(arg);
+  NVTE_CHECK(static_cast<size_t>(seq.size()) == num_groups, name, " must have ", num_groups,
+             " tensors.");
   for (size_t i = 0; i < num_groups; ++i) {
-    out.emplace_back(packed.select(0, static_cast<int64_t>(i)));
+    auto tensor = seq[i].cast<at::Tensor>();
+    NVTE_CHECK(tensor.is_cuda(), name, " tensors must be CUDA tensors.");
+    // Do not require tensor.scalar_type() == compute dtype. Caller-owned
+    // main_grad buffers are allocated by Megatron and may be FP32 even when TE
+    // grouped MLP compute is BF16.
+    NVTE_CHECK(tensor.dim() == 2, name, " tensors must be rank-2 wgrad buffers.");
+    NVTE_CHECK(tensor.size(0) == rows && tensor.size(1) == cols, name,
+               " tensors must have shape [rows, cols].");
+    check_contiguous(tensor, name);
+    out.emplace_back(tensor);
   }
   return out;
 }
@@ -315,7 +312,8 @@ WgradOutput wgrad_output_from_arg(py::handle arg, bool compute_wgrad, size_t num
     // should not receive a newly allocated grad tensor from this helper.
     out.packed = arg.cast<at::Tensor>();
     NVTE_CHECK(out.packed.is_cuda(), name, " must be a CUDA tensor.");
-    NVTE_CHECK(out.packed.scalar_type() == dtype, name, " must have the requested dtype.");
+    // Do not require out.packed.scalar_type() == compute dtype. Caller-owned
+    // main_grad buffers keep the dtype chosen by Megatron's grad-buffer config.
     NVTE_CHECK(out.packed.dim() == 3, name, " must have shape [num_groups, rows, cols].");
     NVTE_CHECK(static_cast<size_t>(out.packed.size(0)) == num_groups, name,
                " first dimension must be ", num_groups, ".");
@@ -328,7 +326,7 @@ WgradOutput wgrad_output_from_arg(py::handle arg, bool compute_wgrad, size_t num
   // Case 4: discrete weights with externally-owned per-expert buffers, e.g.
   // Megatron main_grad list. GEMM writes each tensor in-place and returns no
   // allocated grad list to Python.
-  out.tensors = output_tensor_list_from_arg(arg, num_groups, dtype, name);
+  out.tensors = output_tensor_list_from_arg(arg, num_groups, rows, cols, name);
   return out;
 }
 

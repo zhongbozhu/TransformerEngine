@@ -98,7 +98,7 @@ def _copy_grouped_mlp_params(dst: te_ops.Sequential, src: te_ops.Sequential) -> 
                         )
 
 
-def _init_main_grads(module: te_ops.Sequential) -> None:
+def _init_main_grads(module: te_ops.Sequential, dtype: torch.dtype) -> None:
     for linear in (module[0], module[2]):
         if linear.single_grouped_weight:
             linear.weight.main_grad = torch.zeros(
@@ -106,12 +106,12 @@ def _init_main_grads(module: te_ops.Sequential) -> None:
                 linear.out_features,
                 linear.in_features,
                 device="cuda",
-                dtype=torch.bfloat16,
+                dtype=dtype,
             )
         else:
             for group_idx in range(linear.num_groups):
                 weight = getattr(linear, f"weight{group_idx}")
-                weight.main_grad = torch.zeros_like(weight)
+                weight.main_grad = torch.zeros_like(weight, dtype=dtype)
 
 
 def _run_grouped_mlp(
@@ -241,6 +241,7 @@ def _run_megacpp_against_python(
     activation_kind: str = "scaled_swiglu",
     single_grouped_param: bool = False,
     accumulate_into_main_grad: bool = False,
+    main_grad_dtype: torch.dtype | None = None,
     compare_zero_expert_grads: bool = True,
     monkeypatch,
 ) -> None:
@@ -274,8 +275,10 @@ def _run_megacpp_against_python(
     )
     _copy_grouped_mlp_params(test, ref)
     if accumulate_into_main_grad:
-        _init_main_grads(ref)
-        _init_main_grads(test)
+        if main_grad_dtype is None:
+            raise ValueError("main_grad_dtype must be set when using Megatron-owned main_grad.")
+        _init_main_grads(ref, main_grad_dtype)
+        _init_main_grads(test, main_grad_dtype)
 
     # Paged stashing passes a static physical buffer to the op while m_splits
     # describe only the valid prefix. Rows after sum(m_splits) are garbage and
@@ -332,13 +335,17 @@ def _run_megacpp_against_python(
     ids=["discrete_weight", "packed_weight"],
 )
 @pytest.mark.parametrize(
-    "accumulate_into_main_grad",
-    [False, True],
-    ids=["cpp_allocated_wgrad", "megatron_main_grad"],
+    "accumulate_into_main_grad,main_grad_dtype",
+    [
+        pytest.param(False, None, id="cpp_allocated_wgrad"),
+        pytest.param(True, torch.bfloat16, id="megatron_main_grad_bf16"),
+        pytest.param(True, torch.float32, id="megatron_main_grad_fp32"),
+    ],
 )
 def test_megacpp_grouped_mlp_wgrad_storage_matches_python(
     single_grouped_param,
     accumulate_into_main_grad,
+    main_grad_dtype,
     monkeypatch,
 ):
     torch.manual_seed(1234)
@@ -349,6 +356,7 @@ def test_megacpp_grouped_mlp_wgrad_storage_matches_python(
         split_device="cuda",
         single_grouped_param=single_grouped_param,
         accumulate_into_main_grad=accumulate_into_main_grad,
+        main_grad_dtype=main_grad_dtype,
         monkeypatch=monkeypatch,
     )
 
