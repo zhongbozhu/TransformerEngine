@@ -256,8 +256,7 @@ struct GroupedGemmResources {
 };
 
 GroupedGemmResources make_grouped_mlp_backend_resources(const c10::Device &device,
-                                                        size_t num_groups,
-                                                        py::handle scratch) {
+                                                        size_t num_groups, py::handle scratch) {
   // Keep the backend resource policy private to megacpp. Today this is cuBLAS
   // grouped GEMM scratch; future backends can change this helper without
   // changing the Python or pybind contract.
@@ -275,9 +274,8 @@ void grouped_gemm(GroupedTensorWrapper *A, bool transa, GroupedTensorWrapper *B,
   });
 }
 
-std::vector<at::Tensor> output_tensor_list_from_arg(py::handle arg, size_t num_groups,
-                                                    int64_t rows, int64_t cols,
-                                                    const std::string &name) {
+std::vector<at::Tensor> output_tensor_list_from_arg(py::handle arg, size_t num_groups, int64_t rows,
+                                                    int64_t cols, const std::string &name) {
   std::vector<at::Tensor> out;
   if (is_none(arg)) {
     return out;
@@ -327,8 +325,7 @@ WgradOutput wgrad_output_from_arg(py::handle arg, bool compute_wgrad, size_t num
     // allocation. Single grouped weight keeps this packed as [G, N, K];
     // discrete weights split the same packed allocation into per-expert views.
     out.packed =
-        at::empty({static_cast<int64_t>(num_groups), rows, cols},
-                  at::device(device).dtype(dtype));
+        at::empty({static_cast<int64_t>(num_groups), rows, cols}, at::device(device).dtype(dtype));
     out.owns_storage = true;
     out.is_grouped = prefer_grouped_output;
     if (out.is_grouped) {
@@ -389,14 +386,12 @@ void grouped_gemm_fwd_dgrad(GroupedWeightArg *weights, bool trans_weight,
 }
 
 std::vector<at::Tensor> grouped_gemm_wgrad(GroupedTensorWrapper *x, GroupedTensorWrapper *dy,
-                                            py::handle output, bool compute_wgrad, bool accumulate,
-                                            GroupedGemmResources *resources,
-                                            at::ScalarType dtype, int64_t rows,
-                                            int64_t cols, const std::string &name,
-                                            bool prefer_grouped_output) {
-  auto prepared =
-      wgrad_output_from_arg(output, compute_wgrad, resources->num_groups, dtype,
-                            resources->device, rows, cols, name, prefer_grouped_output);
+                                           py::handle output, bool compute_wgrad, bool accumulate,
+                                           GroupedGemmResources *resources, at::ScalarType dtype,
+                                           int64_t rows, int64_t cols, const std::string &name,
+                                           bool prefer_grouped_output) {
+  auto prepared = wgrad_output_from_arg(output, compute_wgrad, resources->num_groups, dtype,
+                                        resources->device, rows, cols, name, prefer_grouped_output);
   NVTE_CHECK(!(prepared.owns_storage && accumulate), name,
              " cannot accumulate into a newly allocated wgrad buffer.");
   std::vector<at::Tensor> returned_wgrads;
@@ -643,8 +638,7 @@ ActivationBackwardResult grouped_mlp_activation_backward(
 
 std::vector<at::Tensor> megacpp_grouped_mlp_forward(
     const at::Tensor &input, at::ScalarType act_dtype, const at::Tensor &split_sizes,
-    py::handle fc1_weight,
-    py::handle fc1_bias, py::handle fc2_weight, py::handle fc2_bias,
+    py::handle fc1_weight, py::handle fc1_bias, py::handle fc2_weight, py::handle fc2_bias,
     const std::optional<at::Tensor> &act_scales, const std::string &activation,
     int64_t glu_interleave_size, double activation_limit, double activation_alpha,
     double activation_glu_linear_offset, py::handle gemm_scratch) {
@@ -712,8 +706,7 @@ std::vector<at::Tensor> megacpp_grouped_mlp_forward(
   std::vector<int64_t> out_shape = input.sizes().vec();
   out_shape.back() = fc2_out_features;
   auto output = at::empty(out_shape, x.options());
-  auto grouped_fc2_x =
-      make_grouped_tensor(fc2_x, split_sizes_i64, fc2_offsets, fc2_in_features);
+  auto grouped_fc2_x = make_grouped_tensor(fc2_x, split_sizes_i64, fc2_offsets, fc2_in_features);
   auto grouped_output =
       make_grouped_tensor(output, split_sizes_i64, output_offsets, fc2_out_features);
   grouped_gemm_fwd_dgrad(&fc2_weights, true, &grouped_fc2_x, false, &grouped_output,
@@ -726,15 +719,15 @@ std::vector<at::Tensor> megacpp_grouped_mlp_forward(
 
 py::tuple megacpp_grouped_mlp_backward(
     const at::Tensor &grad_output, at::ScalarType act_dtype, const at::Tensor &split_sizes,
-    const at::Tensor &x_offsets,
-    const at::Tensor &fc1_offsets, const at::Tensor &fc2_offsets, const at::Tensor &fc2_dy_offsets,
-    const at::Tensor &base_offsets, const at::Tensor &x, const at::Tensor &fc1_activation_input,
-    const at::Tensor &fc2_x, const std::optional<at::Tensor> &act_scales, py::handle fc1_weight,
-    py::handle fc2_weight, py::handle fc1_wgrad_output, bool fc1_compute_wgrad,
-    bool fc1_accumulate_wgrad, py::handle fc2_wgrad_output, bool fc2_compute_wgrad,
-    bool fc2_accumulate_wgrad, const std::string &activation, int64_t glu_interleave_size,
-    double activation_limit, double activation_alpha, double activation_glu_linear_offset,
-    bool act_scales_requires_grad, bool input_requires_grad, py::handle gemm_scratch) {
+    const at::Tensor &x_offsets, const at::Tensor &fc1_offsets, const at::Tensor &fc2_offsets,
+    const at::Tensor &fc2_dy_offsets, const at::Tensor &base_offsets, const at::Tensor &x,
+    const at::Tensor &fc1_activation_input, const at::Tensor &fc2_x,
+    const std::optional<at::Tensor> &act_scales, py::handle fc1_weight, py::handle fc2_weight,
+    py::handle fc1_wgrad_output, bool fc1_compute_wgrad, bool fc1_accumulate_wgrad,
+    py::handle fc2_wgrad_output, bool fc2_compute_wgrad, bool fc2_accumulate_wgrad,
+    const std::string &activation, int64_t glu_interleave_size, double activation_limit,
+    double activation_alpha, double activation_glu_linear_offset, bool act_scales_requires_grad,
+    bool input_requires_grad, py::handle gemm_scratch) {
   (void)base_offsets;
   NVTE_CHECK(grad_output.is_cuda(), "megacpp_grouped_mlp_backward requires CUDA grad_output.");
   at::cuda::CUDAGuard device_guard(grad_output.device());
@@ -769,14 +762,13 @@ py::tuple megacpp_grouped_mlp_backward(
     auto grouped_fc2_x_for_wgrad =
         make_grouped_tensor(fc2_x_for_wgrad, split_sizes, fc2_offsets, fc2_in_features);
     fc2_wgrads = grouped_gemm_wgrad(&grouped_fc2_x_for_wgrad, &grouped_dy, fc2_wgrad_output,
-                                    fc2_compute_wgrad, fc2_accumulate_wgrad, &gemm_resources,
-                                    dtype, fc2_out_features, fc2_in_features, "fc2_wgrad_output",
+                                    fc2_compute_wgrad, fc2_accumulate_wgrad, &gemm_resources, dtype,
+                                    fc2_out_features, fc2_in_features, "fc2_wgrad_output",
                                     fc2_weights.is_grouped);
   }
 
   auto fc2_dx = at::empty({total_tokens, fc2_in_features}, dy.options());
-  auto grouped_fc2_dx =
-      make_grouped_tensor(fc2_dx, split_sizes, fc2_offsets, fc2_in_features);
+  auto grouped_fc2_dx = make_grouped_tensor(fc2_dx, split_sizes, fc2_offsets, fc2_in_features);
   grouped_gemm_fwd_dgrad(&fc2_weights, false, &grouped_dy, false, &grouped_fc2_dx, &gemm_resources);
 
   auto activation_grads = grouped_mlp_activation_backward(
@@ -784,8 +776,7 @@ py::tuple megacpp_grouped_mlp_backward(
       activation_alpha, activation_glu_linear_offset, dtype, act_scales_requires_grad);
   auto fc1_dy = activation_grads.grad_input;
   auto grad_act_scales = activation_grads.grad_act_scales;
-  auto grouped_fc1_dy =
-      make_grouped_tensor(fc1_dy, split_sizes, fc1_offsets, fc1_out_features);
+  auto grouped_fc1_dy = make_grouped_tensor(fc1_dy, split_sizes, fc1_offsets, fc1_out_features);
 
   std::vector<at::Tensor> fc1_wgrads;
   if (fc1_compute_wgrad) {
@@ -794,8 +785,8 @@ py::tuple megacpp_grouped_mlp_backward(
     auto grouped_x_for_wgrad =
         make_grouped_tensor(x_for_wgrad, split_sizes, x_offsets, in_features);
     fc1_wgrads = grouped_gemm_wgrad(&grouped_x_for_wgrad, &grouped_fc1_dy, fc1_wgrad_output,
-                                    fc1_compute_wgrad, fc1_accumulate_wgrad, &gemm_resources,
-                                    dtype, fc1_out_features, in_features, "fc1_wgrad_output",
+                                    fc1_compute_wgrad, fc1_accumulate_wgrad, &gemm_resources, dtype,
+                                    fc1_out_features, in_features, "fc1_wgrad_output",
                                     fc1_weights.is_grouped);
   }
 
@@ -804,8 +795,7 @@ py::tuple megacpp_grouped_mlp_backward(
     std::vector<int64_t> grad_input_shape = grad_output.sizes().vec();
     grad_input_shape.back() = in_features;
     grad_input = at::empty(grad_input_shape, dy.options());
-    auto grouped_grad_input =
-        make_grouped_tensor(grad_input, split_sizes, x_offsets, in_features);
+    auto grouped_grad_input = make_grouped_tensor(grad_input, split_sizes, x_offsets, in_features);
     grouped_gemm_fwd_dgrad(&fc1_weights, false, &grouped_fc1_dy, false, &grouped_grad_input,
                            &gemm_resources);
   } else {
