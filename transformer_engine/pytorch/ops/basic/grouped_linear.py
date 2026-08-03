@@ -82,7 +82,8 @@ def is_op_fuser_grouped_tensor_path_supported(
       library.
     * MXFP8 and NVFP4 are supported on Blackwell GPUs with Compute Capability
       (CC) 10.x and 11.0. NVFP4 requires RHT because graph-safe grouped
-      quantization currently requires it.
+      quantization currently requires it, and NVFP4 grouped GEMM requires
+      cuBLASLt 13.4+.
     * FP8 per-tensor current scaling uses grouped current-scaling quantization
       through ``tex.group_quantize`` and cuBLASLt grouped GEMM with per-batch
       scalar FP8 scaling. It is supported on Hopper and Blackwell, with
@@ -126,6 +127,7 @@ def is_op_fuser_grouped_tensor_path_supported(
     if recipe.nvfp4():
         return (
             device_capability >= (10, 0)
+            and cublaslt_version >= 130400
             and not recipe.disable_rht
             and not recipe.row_scaled_activation
         )

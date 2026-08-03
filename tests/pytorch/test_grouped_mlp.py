@@ -15,6 +15,7 @@ import pytest
 import torch
 
 import transformer_engine.pytorch as te
+from transformer_engine.common import recipe as te_recipe
 from transformer_engine.pytorch.ops.fused.grouped_mlp import (
     _cudnn_frontend_supports_grouped_gemm_srelu,
     _cudnn_frontend_version_supported,
@@ -232,6 +233,84 @@ def make_reference_and_test_tensors(
 
 class TestGroupedLinearOp:
     """Tests for advanced features with grouped linear basic op"""
+
+    @pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4)
+    def test_single_grouped_primary_nvfp4_numerics(self, monkeypatch) -> None:
+        """The op-fuser basic op must preserve parent wgrad for primary NVFP4 weights."""
+        fp4_recipe = te_recipe.NVFP4BlockScaling(disable_stochastic_rounding=True)
+        if not is_op_fuser_grouped_tensor_path_supported(fp4_recipe, torch.bfloat16):
+            pytest.skip("NVFP4 grouped-tensor op-fuser path is unavailable on this system")
+
+        monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
+        group_size = 3
+        in_features = 256
+        out_features = 512
+        split_sizes = torch.tensor([256, 512, 256], dtype=torch.int64, device="cuda")
+        num_tokens = int(split_sizes.sum())
+        base_weights = torch.randn(
+            group_size,
+            out_features,
+            in_features,
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
+
+        with te.quantized_model_init(enabled=True, recipe=fp4_recipe):
+            discrete = te.ops.GroupedLinear(
+                group_size,
+                in_features,
+                out_features,
+                bias=False,
+                device="cuda",
+                dtype=torch.bfloat16,
+            )
+            single = te.ops.GroupedLinear(
+                group_size,
+                in_features,
+                out_features,
+                bias=False,
+                device="cuda",
+                dtype=torch.bfloat16,
+                single_grouped_weight=True,
+            )
+
+        with torch.no_grad():
+            for group_idx in range(group_size):
+                getattr(discrete, f"weight{group_idx}").copy_(base_weights[group_idx])
+            single.weight.copy_(base_weights)
+
+        assert isinstance(single.weight.quantizer, NVFP4Quantizer)
+        assert single.weight.quantizer.with_2d_quantization
+        assert not single.weight._with_gemm_swizzled_scales
+        primary_scale_ptrs = (
+            single.weight.scale_inv.data_ptr(),
+            single.weight.columnwise_scale_inv.data_ptr(),
+        )
+
+        x = torch.randn(
+            num_tokens, in_features, dtype=torch.bfloat16, device="cuda"
+        )
+        dy = torch.randn(num_tokens, out_features, dtype=torch.bfloat16, device="cuda")
+        x_discrete = x.detach().clone().requires_grad_(True)
+        x_single = x.detach().clone().requires_grad_(True)
+        with te.autocast(enabled=True, recipe=fp4_recipe):
+            y_discrete = discrete(x_discrete, split_sizes)
+            y_single = single(x_single, split_sizes)
+        y_discrete.backward(dy)
+        y_single.backward(dy)
+
+        torch.testing.assert_close(y_single, y_discrete, rtol=0, atol=0)
+        torch.testing.assert_close(x_single.grad, x_discrete.grad, rtol=0, atol=0)
+        discrete_wgrad = torch.stack(
+            [getattr(discrete, f"weight{group_idx}").grad for group_idx in range(group_size)]
+        )
+        assert single.weight.grad is not None
+        torch.testing.assert_close(single.weight.grad, discrete_wgrad, rtol=0, atol=0)
+        assert primary_scale_ptrs == (
+            single.weight.scale_inv.data_ptr(),
+            single.weight.columnwise_scale_inv.data_ptr(),
+        )
+        assert not single.weight._with_gemm_swizzled_scales
 
     def test_meta_single_grouped_weight_with_delayed_wgrad(self, monkeypatch) -> None:
         """A deferred op shell must not access its grouped parent before it is attached."""
@@ -543,13 +622,17 @@ class TestGroupedLinearOp:
             and dtype != torch.bfloat16
         ):
             pytest.skip("NVFP4 grouped GEMM only supports BF16 output")
-        if single_grouped_weight and quantization is not None and quantization.startswith("nvfp4"):
-            # Currently, split_quantization is used which is not cuda graph safe.
-            # We should either support grouped weight quantization without rht or need to do
-            # inplace per tensor weight quantization to make this use-case cuda graphable if needed.
+        if (
+            single_grouped_weight
+            and quantization is not None
+            and quantization.startswith("nvfp4")
+            and not quantized_weight
+        ):
+            # Quantizing a BF16 single grouped weight still lacks a graph-safe NVFP4 kernel.
+            # A primary NVFP4 weight is already quantized, and its compact scales are swizzled
+            # by the grouped GEMM wrapper without splitting the parameter.
             pytest.skip(
-                "NVFP4 grouped GEMM with single_grouped_weight is not supported yet; "
-                "only discrete weights (single_grouped_weight=False) are supported."
+                "NVFP4 grouped GEMM with a BF16 single grouped weight is not supported yet."
             )
 
         recipe = make_recipe(quantization)
@@ -1236,12 +1319,14 @@ class TestGroupedMLPFusedOp:
             activation=activation,
         )
 
+    @pytest.mark.parametrize("quantization", ("mxfp8", "nvfp4"))
     @pytest.mark.parametrize("bias", (False, True))
     @pytest.mark.parametrize("activation", ("scaled_swiglu", "scaled_clamped_qgeglu"))
-    @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
     def test_grouped_mlp_single_weight_numerics(
         self,
+        monkeypatch,
         *,
+        quantization: str,
         dtype: torch.dtype = torch.bfloat16,
         bias: bool,
         activation: str,
@@ -1251,16 +1336,30 @@ class TestGroupedMLPFusedOp:
         split_alignment: int = 256,
         glu_interleave_size: int = 32,
     ) -> None:
-        """single_grouped_weight=True/False should match exactly for fused MXFP8 grouped MLP."""
+        """Primary block-scaled single and discrete weights must have identical numerics."""
 
+        monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
+        monkeypatch.setenv("NVTE_CUTEDSL_FUSED_GROUPED_MLP", "1")
         if not te.ops.fused.GroupedMLP_CuTeGEMMGLU.is_supported():
-            pytest.skip("MXFP8 fused grouped MLP is not supported on this system")
+            pytest.skip("Fused grouped MLP is not supported on this system")
+        if quantization == "mxfp8":
+            if not mxfp8_available:
+                pytest.skip(reason_for_no_mxfp8)
+        else:
+            if not nvfp4_available:
+                pytest.skip(reason_for_no_nvfp4)
+            if bias or activation != "scaled_swiglu":
+                pytest.skip("Focused primary-NVFP4 coverage uses no-bias SwiGLU")
 
         split_sizes = [split_alignment * (i + 1) for i in range(group_size)]
         random.shuffle(split_sizes)
         split_sizes = torch.tensor(split_sizes, dtype=torch.int64, device=device)
         in_shape = (split_sizes.sum().item(), hidden_size)
-        recipe = make_recipe("mxfp8")
+        recipe = (
+            make_recipe("mxfp8")
+            if quantization == "mxfp8"
+            else te_recipe.NVFP4BlockScaling(disable_stochastic_rounding=True)
+        )
 
         x_base = torch.empty(in_shape, device=device, dtype=dtype).uniform_(-0.25, 0.25)
         probs_base = torch.empty((in_shape[0],), device=device, dtype=dtype).uniform_(-0.25, 0.25)
@@ -1324,22 +1423,28 @@ class TestGroupedMLPFusedOp:
 
             with torch.no_grad():
                 if single_grouped_weight:
-                    fc1_weights = fc1.weight.quantized_tensors
-                    if fc1_weights is None:
-                        fc1_weights = fc1.weight.split_into_quantized_tensors()
-                    fc2_weights = fc2.weight.quantized_tensors
-                    if fc2_weights is None:
-                        fc2_weights = fc2.weight.split_into_quantized_tensors()
+                    fc1.weight.copy_(torch.stack(fc1_ws_base))
+                    fc2.weight.copy_(torch.stack(fc2_ws_base))
                 for group_idx in range(group_size):
-                    if single_grouped_weight:
-                        fc1_weights[group_idx].copy_(fc1_ws_base[group_idx])
-                        fc2_weights[group_idx].copy_(fc2_ws_base[group_idx])
-                    else:
+                    if not single_grouped_weight:
                         getattr(fc1, f"weight{group_idx}").copy_(fc1_ws_base[group_idx])
                         getattr(fc2, f"weight{group_idx}").copy_(fc2_ws_base[group_idx])
                     if bias:
                         getattr(fc1, f"bias{group_idx}").copy_(fc1_bs_base[group_idx])
                         getattr(fc2, f"bias{group_idx}").copy_(fc2_bs_base[group_idx])
+
+            primary_scale_ptrs = None
+            if quantization == "nvfp4" and single_grouped_weight:
+                assert fc1.weight.quantizer.with_2d_quantization
+                assert fc2.weight.quantizer.with_2d_quantization
+                assert not fc1.weight._with_gemm_swizzled_scales
+                assert not fc2.weight._with_gemm_swizzled_scales
+                primary_scale_ptrs = (
+                    fc1.weight.scale_inv.data_ptr(),
+                    fc1.weight.columnwise_scale_inv.data_ptr(),
+                    fc2.weight.scale_inv.data_ptr(),
+                    fc2.weight.columnwise_scale_inv.data_ptr(),
+                )
 
             x = x_base.detach().clone().requires_grad_(True)
             probs = probs_base.detach().clone().requires_grad_(True)
@@ -1363,6 +1468,16 @@ class TestGroupedMLPFusedOp:
                 te.ops.fused.GroupedMLP_CuTeGEMMGLU,
             )
             assert backward_ops[0][0] is forward_ops[0][0]
+
+            if primary_scale_ptrs is not None:
+                assert primary_scale_ptrs == (
+                    fc1.weight.scale_inv.data_ptr(),
+                    fc1.weight.columnwise_scale_inv.data_ptr(),
+                    fc2.weight.scale_inv.data_ptr(),
+                    fc2.weight.columnwise_scale_inv.data_ptr(),
+                )
+                assert not fc1.weight._with_gemm_swizzled_scales
+                assert not fc2.weight._with_gemm_swizzled_scales
 
             if single_grouped_weight:
                 fc1_dw = fc1.weight.grad.detach().clone()

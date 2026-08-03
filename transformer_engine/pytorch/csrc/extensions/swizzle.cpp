@@ -358,7 +358,8 @@ at::Tensor convert_block_scaling_to_mxfp8_tensor(transformer_engine::TensorWrapp
 std::optional<SwizzledGroupedScales> maybe_swizzle_grouped_tensor(GroupedTensorWrapper &input,
                                                                   bool rowwise_usage,
                                                                   bool columnwise_usage) {
-  if (input.scaling_mode() != NVTE_MXFP8_1D_SCALING) {
+  const auto scaling_mode = input.scaling_mode();
+  if (scaling_mode != NVTE_MXFP8_1D_SCALING && scaling_mode != NVTE_NVFP4_1D_SCALING) {
     return std::nullopt;
   }
   if (input.get_with_gemm_swizzled_scales()) {
@@ -376,10 +377,8 @@ std::optional<SwizzledGroupedScales> maybe_swizzle_grouped_tensor(GroupedTensorW
   std::optional<at::Tensor> rowwise_scales_pyt;
   std::optional<at::Tensor> columnwise_scales_pyt;
 
-  GroupedTensorWrapper swizzle_input(input.num_tensors(), input.logical_shape(),
-                                     input.scaling_mode());
-  GroupedTensorWrapper swizzle_output(input.num_tensors(), input.logical_shape(),
-                                      input.scaling_mode());
+  GroupedTensorWrapper swizzle_input(input.num_tensors(), input.logical_shape(), scaling_mode);
+  GroupedTensorWrapper swizzle_output(input.num_tensors(), input.logical_shape(), scaling_mode);
 
   const auto tensor_offsets = input.get_tensor_offsets();
   if (tensor_offsets.data_ptr != nullptr) {
@@ -397,16 +396,19 @@ std::optional<SwizzledGroupedScales> maybe_swizzle_grouped_tensor(GroupedTensorW
   const size_t per_tensor_first_dim = logical_shape_nvte.data[0] / num_tensors;
   const size_t per_tensor_last_dim = logical_shape_nvte.data[logical_shape_nvte.ndim - 1];
   constexpr size_t kMxfp8BlockSize = 32;
+  constexpr size_t kNvfp4BlockSize = 16;
+  const size_t scaling_block_size =
+      scaling_mode == NVTE_MXFP8_1D_SCALING ? kMxfp8BlockSize : kNvfp4BlockSize;
 
   // Output is always allocated in the per-tensor padded ("swizzle-ready") layout
-  // so the cuDNN grouped GEMM consumer sees the correct stride between experts.
+  // so the grouped GEMM consumer sees the correct stride between experts.
   // The swizzle kernel itself handles converting from the kernel-emitted compact
   // layout (per-tensor first dim is the unpadded value) to this padded layout.
   auto compute_padded_grouped_scale_shape = [&](bool rowwise) {
     const size_t m = rowwise ? per_tensor_first_dim : per_tensor_last_dim;
     const size_t k = rowwise ? per_tensor_last_dim : per_tensor_first_dim;
     const size_t padded_m = ceildiv(m, size_t{128}) * 128;
-    const size_t padded_k = ceildiv(ceildiv(k, kMxfp8BlockSize), size_t{4}) * 4;
+    const size_t padded_k = ceildiv(ceildiv(k, scaling_block_size), size_t{4}) * 4;
     return std::vector<size_t>{num_tensors * padded_m, padded_k};
   };
 

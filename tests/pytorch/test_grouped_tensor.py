@@ -10,6 +10,7 @@ import pytest
 import torch
 import transformer_engine.pytorch as te
 from transformer_engine.pytorch.tensor.grouped_tensor import GroupedTensor
+from transformer_engine.pytorch.tensor.storage import GroupedTensorStorage
 from transformer_engine.pytorch import (
     Quantizer,
     Float8Quantizer,
@@ -47,6 +48,114 @@ reason_for_no_fp8_block_scaling_grouped = (
         " (SM90-SM99)."
     )
 )
+
+
+@pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4)
+@pytest.mark.parametrize(
+    "rowwise,columnwise",
+    [(True, False), (False, True), (True, True)],
+    ids=("rowwise", "columnwise", "both"),
+)
+def test_grouped_nvfp4_swizzle_matches_individual_tensors(
+    rowwise: bool, columnwise: bool
+) -> None:
+    """A compact grouped NVFP4 weight must be swizzled like its individual members.
+
+    Distributed optimizers quantize each local master-weight shard into compact NVFP4 scale
+    storage before parameter all-gather. A single grouped parameter presents the gathered bytes
+    as one GroupedTensor, so the grouped GEMM wrapper must convert those compact scales without
+    falling back to Python-level member tensors.
+    """
+    num_tensors = 3
+    rows = 256
+    cols = 512
+    shape = (rows, cols)
+
+    def make_quantizer(*, optimize_for_gemm: bool) -> NVFP4Quantizer:
+        quantizer = NVFP4Quantizer(
+            with_rht=False,
+            with_post_rht_amax=False,
+            with_2d_quantization=True,
+            stochastic_rounding=False,
+            with_random_sign_mask=False,
+        )
+        quantizer.set_usage(rowwise=True, columnwise=True)
+        quantizer.optimize_for_gemm = optimize_for_gemm
+        quantizer.internal = False
+        return quantizer
+
+    torch.manual_seed(1234)
+    inputs = [
+        torch.randn(shape, dtype=torch.bfloat16, device="cuda") for _ in range(num_tensors)
+    ]
+    compact_quantizer = make_quantizer(optimize_for_gemm=False)
+    swizzled_quantizer = make_quantizer(optimize_for_gemm=True)
+    compact_members = [compact_quantizer(tensor) for tensor in inputs]
+    reference_members = [swizzled_quantizer(tensor) for tensor in inputs]
+
+    assert all(not tensor._with_gemm_swizzled_scales for tensor in compact_members)
+    assert all(tensor._with_gemm_swizzled_scales for tensor in reference_members)
+    for tensor in compact_members:
+        # NVFP4 weight quantization is mathematically 16x16. Its physical scale tensor still
+        # uses the 1x16 layout, so every scale row is repeated for the 16 rows in that block.
+        rowwise_blocks = tensor._rowwise_scale_inv.view(rows // 16, 16, -1)
+        columnwise_blocks = tensor._columnwise_scale_inv.view(cols // 16, 16, -1)
+        assert torch.equal(rowwise_blocks, rowwise_blocks[:, :1].expand_as(rowwise_blocks))
+        assert torch.equal(
+            columnwise_blocks, columnwise_blocks[:, :1].expand_as(columnwise_blocks)
+        )
+
+    grouped = GroupedTensorStorage(
+        shape=(num_tensors * rows, cols),
+        dtype=torch.bfloat16,
+        num_tensors=num_tensors,
+        shapes=[shape] * num_tensors,
+        quantizer=compact_quantizer,
+        data=torch.cat([tensor._rowwise_data.reshape(-1) for tensor in compact_members]),
+        columnwise_data=torch.cat(
+            [tensor._columnwise_data.reshape(-1) for tensor in compact_members]
+        ),
+        scale_inv=torch.cat(
+            [tensor._rowwise_scale_inv.reshape(-1) for tensor in compact_members]
+        ),
+        columnwise_scale_inv=torch.cat(
+            [tensor._columnwise_scale_inv.reshape(-1) for tensor in compact_members]
+        ),
+        amax=torch.cat([tensor._amax_rowwise.reshape(-1) for tensor in compact_members]),
+        columnwise_amax=torch.cat(
+            [tensor._amax_columnwise.reshape(-1) for tensor in compact_members]
+        ),
+    )
+    compact_rowwise_data = grouped.rowwise_data.clone()
+    compact_columnwise_data = grouped.columnwise_data.clone()
+    compact_scale_ptrs = (grouped.scale_inv.data_ptr(), grouped.columnwise_scale_inv.data_ptr())
+
+    tex.grouped_swizzle_for_gemm(grouped, rowwise, columnwise)
+
+    assert grouped._with_gemm_swizzled_scales
+    # Swizzling changes scale layout only. The packed FP4 weight bytes consumed by GEMM must
+    # remain exactly the same for both the forward and transpose representations.
+    assert torch.equal(grouped.rowwise_data, compact_rowwise_data)
+    assert torch.equal(grouped.columnwise_data, compact_columnwise_data)
+    expected_rowwise_scales = torch.cat(
+        [tensor._rowwise_scale_inv.reshape(-1) for tensor in reference_members]
+    )
+    expected_columnwise_scales = torch.cat(
+        [tensor._columnwise_scale_inv.reshape(-1) for tensor in reference_members]
+    )
+    if rowwise:
+        assert grouped.scale_inv.data_ptr() != compact_scale_ptrs[0]
+        # Scale swizzling is a byte permutation, not a numerical operation.
+        assert torch.equal(grouped.scale_inv.reshape(-1), expected_rowwise_scales)
+    else:
+        assert grouped.scale_inv is None
+    if columnwise:
+        assert grouped.columnwise_scale_inv.data_ptr() != compact_scale_ptrs[1]
+        assert torch.equal(
+            grouped.columnwise_scale_inv.reshape(-1), expected_columnwise_scales
+        )
+    else:
+        assert grouped.columnwise_scale_inv is None
 
 _quantization_params = [
     pytest.param(

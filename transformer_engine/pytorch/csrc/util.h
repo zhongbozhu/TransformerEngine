@@ -39,7 +39,7 @@ std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm_unchecked(
 using SwizzledGroupedScales = std::pair<std::optional<at::Tensor>, std::optional<at::Tensor>>;
 
 /*! \brief Swizzle grouped tensor scales for GEMM if needed.
- * Currently only works for MXFP8 1D scaling with uniform shapes.
+ * Supports MXFP8 and NVFP4 1D scaling.
  *
  * \param[in,out] input           Grouped tensor whose scales to swizzle.
  * \param[in]     rowwise_usage   Whether rowwise scales are needed.

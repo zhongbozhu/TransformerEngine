@@ -1723,6 +1723,107 @@ def test_single_grouped_weight_matches_discrete_grouped_tensor_path(monkeypatch,
     torch.testing.assert_close(single.weight.grad.float(), discrete_wgrad.float(), **tolerances)
 
 
+@pytest.mark.skipif(not _nvfp4_available, reason=_reason_for_no_nvfp4)
+def test_single_grouped_primary_nvfp4_matches_discrete_grouped_tensor_path(monkeypatch):
+    """Compact primary NVFP4 weights must work without splitting the grouped parameter."""
+    fp8_recipe = recipe.NVFP4BlockScaling(disable_stochastic_rounding=True)
+    if not is_module_grouped_tensor_path_supported(fp8_recipe, torch.bfloat16):
+        pytest.skip("NVFP4 GroupedTensor GEMM is unavailable on this system.")
+
+    monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
+    FP8GlobalStateManager.reset()
+
+    num_gemms = 3
+    in_features = 256
+    out_features = 512
+    m_splits = torch.tensor([256, 512, 256], dtype=torch.int64, device="cuda")
+    total_tokens = int(m_splits.sum())
+    weights = torch.randn(
+        num_gemms,
+        out_features,
+        in_features,
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+
+    with quantized_model_init(enabled=True, recipe=fp8_recipe):
+        discrete = GroupedLinear(
+            num_gemms,
+            in_features,
+            out_features,
+            bias=False,
+            params_dtype=torch.bfloat16,
+            device="cuda",
+            use_grouped_tensor=True,
+        )
+        single = GroupedLinear(
+            num_gemms,
+            in_features,
+            out_features,
+            bias=False,
+            params_dtype=torch.bfloat16,
+            device="cuda",
+            single_grouped_weight=True,
+            use_grouped_tensor=True,
+        )
+
+    with torch.no_grad():
+        for idx in range(num_gemms):
+            getattr(discrete, f"weight{idx}").copy_(weights[idx])
+        single.weight.copy_(weights)
+
+    assert isinstance(single.weight.quantizer, NVFP4Quantizer)
+    assert single.weight.quantizer.with_2d_quantization
+    assert not single.weight.quantizer.with_rht
+    assert not single.weight._with_gemm_swizzled_scales
+    primary_ptrs = (
+        single.weight.rowwise_data.data_ptr(),
+        single.weight.columnwise_data.data_ptr(),
+        single.weight.scale_inv.data_ptr(),
+        single.weight.columnwise_scale_inv.data_ptr(),
+    )
+
+    # The grouped and discrete primary parameters must contain identical quantized weights before
+    # GEMM. This makes the later numerical comparison specifically test grouped scale swizzling.
+    for idx, single_member in enumerate(single.weight.quantized_tensors):
+        discrete_member = getattr(discrete, f"weight{idx}")
+        assert torch.equal(single_member._rowwise_data, discrete_member._rowwise_data)
+        assert torch.equal(single_member._columnwise_data, discrete_member._columnwise_data)
+        assert torch.equal(single_member._rowwise_scale_inv, discrete_member._rowwise_scale_inv)
+        assert torch.equal(
+            single_member._columnwise_scale_inv, discrete_member._columnwise_scale_inv
+        )
+
+    x = torch.randn(total_tokens, in_features, dtype=torch.bfloat16, device="cuda")
+    dy = torch.randn(total_tokens, out_features, dtype=torch.bfloat16, device="cuda")
+    x_discrete = x.detach().clone().requires_grad_(True)
+    x_single = x.detach().clone().requires_grad_(True)
+
+    with autocast(enabled=True, recipe=fp8_recipe):
+        y_discrete = discrete(x_discrete, m_splits)
+        y_single = single(x_single, m_splits)
+    y_discrete.backward(dy)
+    y_single.backward(dy)
+
+    torch.testing.assert_close(y_single, y_discrete, rtol=0, atol=0)
+    torch.testing.assert_close(x_single.grad, x_discrete.grad, rtol=0, atol=0)
+    discrete_wgrad = torch.stack(
+        [getattr(discrete, f"weight{idx}").grad for idx in range(num_gemms)]
+    )
+    assert single.weight.grad is not None
+    torch.testing.assert_close(single.weight.grad, discrete_wgrad, rtol=0, atol=0)
+
+    # The generic grouped GEMM wrapper owns temporary swizzled scales. The registered primary
+    # parameter must remain in its compact optimizer/checkpoint representation.
+    assert primary_ptrs == (
+        single.weight.rowwise_data.data_ptr(),
+        single.weight.columnwise_data.data_ptr(),
+        single.weight.scale_inv.data_ptr(),
+        single.weight.columnwise_scale_inv.data_ptr(),
+    )
+    assert not single.weight._with_gemm_swizzled_scales
+
+
 @pytest.mark.skipif(not _mxfp8_available, reason=_reason_for_no_mxfp8)
 def test_single_grouped_weight_mxfp8_workspace_cache(monkeypatch):
     """BF16 primary weights update one persistent MXFP8 grouped workspace per iteration."""
