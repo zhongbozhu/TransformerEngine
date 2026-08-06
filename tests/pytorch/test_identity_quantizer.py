@@ -25,6 +25,9 @@ from transformer_engine.pytorch import (
     MXFP8Quantizer,
     NVFP4Quantizer,
 )
+from transformer_engine.pytorch.custom_recipes import (
+    custom_grouped_quantizer,
+)
 from transformer_engine.pytorch.tensor.identity_tensor import IdentityTensor
 from transformer_engine.pytorch.tensor.storage.identity_tensor_storage import (
     IdentityTensorStorage,
@@ -291,10 +294,6 @@ class TestIdentityQuantizerUnit:
             )
 
     def test_grouped_split_rejects_mixed_identity_and_quantized_operands(self):
-        from transformer_engine.pytorch.module.grouped_linear import (
-            _validate_grouped_quantizer_list,
-        )
-
         cases = [
             [IdentityQuantizer(), _mxfp8(tex.DType.kFloat8E4M3)],
             [
@@ -311,7 +310,9 @@ class TestIdentityQuantizerUnit:
 
         for quantizers in cases:
             with pytest.raises(ValueError, match="mix Identity-backed and quantized"):
-                _validate_grouped_quantizer_list(quantizers, operand_name="input")
+                custom_grouped_quantizer.validate_grouped_quantizer_list(
+                    quantizers, operand_name="input"
+                )
 
     def test_hybrid_split_forwards_disable_bulk_allocation_to_both_directions(self, monkeypatch):
         import transformer_engine.pytorch.module.grouped_linear as grouped_linear

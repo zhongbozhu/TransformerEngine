@@ -38,6 +38,9 @@ from transformer_engine.pytorch.custom_recipes.quantizer_factory_zoo import (
     mxfp8_fwd_nvfp4_bwd_factory,
     nvfp4_linear_fp8_dpa_factory,
 )
+from transformer_engine.pytorch.custom_recipes import (
+    custom_grouped_quantizer,
+)
 from transformer_engine.pytorch import (
     autocast,
     quantized_model_init,
@@ -769,30 +772,39 @@ class TestHybridSaveOriginalInputPolicy:
             with autocast(enabled=True, recipe=recipe.DelayedScaling()):
                 model(inp)
 
-    def test_grouped_linear_classifies_requantization_safety_once_per_generation(self):
+    def test_grouped_linear_unsafe_custom_input_disables_save_original_input(self):
         counters = [{"calls": 0}, {"calls": 0}]
-        input_quantizers = [_CountingUnsafeIdentityQuantizer(counter) for counter in counters]
-        generation = []
-        for input_quantizer in input_quantizers:
-            generation.extend((input_quantizer, IdentityQuantizer(), IdentityQuantizer()))
+        input_index = 0
+
+        def qfactory(role):
+            nonlocal input_index
+            if role.module_type == "grouped_linear" and role.tensor_type == "input":
+                counter = counters[input_index % len(counters)]
+                input_index += 1
+                return _CountingUnsafeIdentityQuantizer(counter)
+            return IdentityQuantizer()
 
         module = GroupedLinear(
             2,
-            16,
-            16,
+            128,
+            128,
             bias=False,
-            device="meta",
-        )
-        module.quantizers["scaling_fwd"] = generation
+            params_dtype=torch.bfloat16,
+            save_original_input=True,
+        ).cuda()
+        inp = torch.randn(128, 128, dtype=torch.bfloat16, device="cuda", requires_grad=True)
+        custom_recipe = recipe.CustomRecipe(qfactory=qfactory)
 
-        module._validate_quantizer_generation(fwd=True)
-        assert module._unsafe_requantization_input_quantizer is input_quantizers[0]
-        assert [counter.get("safety_calls", 0) for counter in counters] == [1, 0]
+        with pytest.warns(UserWarning, match="Ignoring save_original_input=True"):
+            with autocast(enabled=True, recipe=custom_recipe):
+                out = module(inp, [64, 64])
 
-        # The generation list is stable between forwards, so the O(1) identity
-        # guard must avoid re-running capability checks.
-        module._validate_quantizer_generation(fwd=True)
+        calls_after_forward = [counter["calls"] for counter in counters]
+        out.float().sum().backward()
+
         assert [counter.get("safety_calls", 0) for counter in counters] == [1, 0]
+        assert [counter["calls"] for counter in counters] == calls_after_forward
+        assert inp.grad is not None
 
     @staticmethod
     def _counting_identity_hybrid_recipe(
@@ -4200,8 +4212,8 @@ class TestHybridAllModules:
 class TestHybridGroupedLinearValidation:
     """GroupedLinear generation-validation and split-dispatch coverage.
 
-    Structural compatibility is validated once per real quantizer generation.
-    Steady-state dispatch reads the first expert after that uniformity check."""
+    CustomRecipe compatibility is validated once per real quantizer generation.
+    Built-in recipes skip that validation and steady-state generation processing."""
 
     @pytest.mark.parametrize(
         "quantizers",
@@ -4215,11 +4227,9 @@ class TestHybridGroupedLinearValidation:
         ],
     )
     def test_uniform_lists_validate(self, quantizers):
-        from transformer_engine.pytorch.module.grouped_linear import (
-            _validate_grouped_quantizer_list,
+        custom_grouped_quantizer.validate_grouped_quantizer_list(
+            quantizers, operand_name="input"
         )
-
-        _validate_grouped_quantizer_list(quantizers, operand_name="input")
 
     def test_plain_custom_quantizer_uses_python_split_fallback(self, monkeypatch):
         import transformer_engine.pytorch.module.grouped_linear as grouped_linear
@@ -4283,52 +4293,44 @@ class TestHybridGroupedLinearValidation:
         assert all(result.columnwise_sub_storage is not None for result in out)
 
     def test_mixed_hybrid_and_plain_raises(self):
-        from transformer_engine.pytorch.module.grouped_linear import (
-            _validate_grouped_quantizer_list,
-        )
-
         quantizers = [
             _make_hybrid_quantizer_fp8_row_fp4_col(),
             _make_fp8_quantizer(),
             _make_hybrid_quantizer_fp8_row_fp4_col(),
         ]
         with pytest.raises(ValueError, match="mix HybridQuantizer and non-hybrid"):
-            _validate_grouped_quantizer_list(quantizers, operand_name="input")
+            custom_grouped_quantizer.validate_grouped_quantizer_list(
+                quantizers, operand_name="input"
+            )
 
     def test_none_plus_hybrid_raises(self):
-        from transformer_engine.pytorch.module.grouped_linear import (
-            _validate_grouped_quantizer_list,
-        )
-
         quantizers = [
             _make_hybrid_quantizer_fp8_row_fp4_col(),
             None,
             _make_hybrid_quantizer_fp8_row_fp4_col(),
         ]
         with pytest.raises(ValueError, match="mix None and concrete quantizers"):
-            _validate_grouped_quantizer_list(quantizers, operand_name="input")
+            custom_grouped_quantizer.validate_grouped_quantizer_list(
+                quantizers, operand_name="input"
+            )
 
     def test_mixed_identity_dtype_raises(self):
-        from transformer_engine.pytorch.module.grouped_linear import (
-            _validate_grouped_quantizer_list,
-        )
-
         quantizers = [
             IdentityQuantizer(dtype=torch.bfloat16),
             IdentityQuantizer(dtype=torch.float16),
         ]
         with pytest.raises(ValueError, match="incompatible plain backend configurations"):
-            _validate_grouped_quantizer_list(quantizers, operand_name="input")
+            custom_grouped_quantizer.validate_grouped_quantizer_list(
+                quantizers, operand_name="input"
+            )
 
     def test_distinct_delayed_scaling_state_is_allowed(self):
-        from transformer_engine.pytorch.module.grouped_linear import (
-            _validate_grouped_quantizer_list,
-        )
-
         quantizers = [_make_delayed_quantizer(), _make_delayed_quantizer()]
         quantizers[1].scale.fill_(2.0)
         quantizers[1].amax.fill_(3.0)
-        _validate_grouped_quantizer_list(quantizers, operand_name="input")
+        custom_grouped_quantizer.validate_grouped_quantizer_list(
+            quantizers, operand_name="input"
+        )
 
     @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
     @pytest.mark.parametrize(
@@ -4496,10 +4498,6 @@ class TestHybridGroupedLinearValidation:
         assert all(storage.columnwise_sub_storage is not None for storage in out)
 
     def test_validation_rejects_mixed_columnwise_source_policies(self):
-        from transformer_engine.pytorch.module.grouped_linear import (
-            _validate_grouped_quantizer_list,
-        )
-
         quantizers = [
             HybridQuantizer(
                 rowwise_quantizer=_make_fp8_quantizer(),
@@ -4510,13 +4508,11 @@ class TestHybridGroupedLinearValidation:
         ]
 
         with pytest.raises(ValueError, match="mixed columnwise source policies"):
-            _validate_grouped_quantizer_list(quantizers, operand_name="input")
+            custom_grouped_quantizer.validate_grouped_quantizer_list(
+                quantizers, operand_name="input"
+            )
 
     def test_validation_rejects_same_family_config_mismatch(self):
-        from transformer_engine.pytorch.module.grouped_linear import (
-            _validate_grouped_quantizer_list,
-        )
-
         quantizers = [_make_fp8_quantizer(), _make_fp8_quantizer()]
         quantizers[1].force_pow_2_scales = True
 
@@ -4524,11 +4520,45 @@ class TestHybridGroupedLinearValidation:
             ValueError,
             match="incompatible plain backend configurations",
         ):
-            _validate_grouped_quantizer_list(quantizers, operand_name="input")
+            custom_grouped_quantizer.validate_grouped_quantizer_list(
+                quantizers, operand_name="input"
+            )
+
+    def test_builtin_recipe_skips_custom_grouped_validation(self, monkeypatch):
+        def unexpected_validation(*_args, **_kwargs):
+            pytest.fail("built-in recipes must not run custom grouped-quantizer validation")
+
+        monkeypatch.setattr(
+            custom_grouped_quantizer,
+            "validate_grouped_quantizer_list",
+            unexpected_validation,
+        )
+        model = GroupedLinear(
+            2,
+            128,
+            128,
+            bias=False,
+            params_dtype=torch.bfloat16,
+            use_grouped_tensor=False,
+        ).cuda()
+        tensor = torch.randn(128, 128, dtype=torch.bfloat16, device="cuda")
+        m_splits = torch.tensor([64, 64], dtype=torch.int64)
+
+        with torch.no_grad(), autocast(enabled=True, recipe=recipe.DelayedScaling()):
+            model(tensor, m_splits)
+            assert model._custom_quantizer_cache == {}
+
+            def unexpected_custom_validation(*_args, **_kwargs):
+                pytest.fail("built-in recipes must not validate custom quantizers per forward")
+
+            monkeypatch.setattr(
+                model,
+                "_validate_custom_recipe_quantizers",
+                unexpected_custom_validation,
+            )
+            model(tensor, m_splits)
 
     def test_validation_runs_only_with_quantizer_generation(self, monkeypatch):
-        import transformer_engine.pytorch.module.grouped_linear as grouped_linear
-
         def make_qfactory(columnwise_source):
             def qfactory(_role):
                 return HybridQuantizer(
@@ -4544,7 +4574,7 @@ class TestHybridGroupedLinearValidation:
         m_splits = torch.tensor([64, 64], dtype=torch.int64)
         original_recipe = recipe.CustomRecipe(qfactory=make_qfactory("original"))
 
-        real_validate = grouped_linear._validate_grouped_quantizer_list
+        real_validate = custom_grouped_quantizer.validate_grouped_quantizer_list
         validation_calls = []
 
         def tracked_validate(quantizers, *, operand_name="operand"):
@@ -4552,26 +4582,26 @@ class TestHybridGroupedLinearValidation:
             return real_validate(quantizers, operand_name=operand_name)
 
         monkeypatch.setattr(
-            grouped_linear,
-            "_validate_grouped_quantizer_list",
+            custom_grouped_quantizer,
+            "validate_grouped_quantizer_list",
             tracked_validate,
         )
 
         with torch.no_grad(), autocast(enabled=True, recipe=original_recipe):
             model(tensor, m_splits)
         first_call_count = len(validation_calls)
-        first_generation = model._validated_quantizer_generations["scaling_fwd"]
+        first_generation = model._custom_quantizer_cache["scaling_fwd"]
         assert first_call_count > 0
 
         with torch.no_grad(), autocast(enabled=True, recipe=original_recipe):
             model(tensor, m_splits)
         assert len(validation_calls) == first_call_count
-        assert model._validated_quantizer_generations["scaling_fwd"] is first_generation
+        assert model._custom_quantizer_cache["scaling_fwd"] is first_generation
 
         rebuilt_recipe = recipe.CustomRecipe(qfactory=make_qfactory("rowwise_dequantized"))
         with torch.no_grad(), autocast(enabled=True, recipe=rebuilt_recipe):
             model(tensor, m_splits)
-        rebuilt_generation = model._validated_quantizer_generations["scaling_fwd"]
+        rebuilt_generation = model._custom_quantizer_cache["scaling_fwd"]
         assert len(validation_calls) > first_call_count
         assert rebuilt_generation is not first_generation
         assert rebuilt_generation[0].columnwise_source == "rowwise_dequantized"
@@ -4597,7 +4627,7 @@ class TestHybridGroupedLinearValidation:
             with pytest.raises(ValueError, match="mixed columnwise source policies"):
                 with torch.no_grad(), autocast(enabled=True, recipe=mixed_recipe):
                     model(tensor, m_splits)
-            assert model._validated_quantizer_generations["scaling_fwd"] is rebuilt_generation
+            assert model._custom_quantizer_cache["scaling_fwd"] is rebuilt_generation
 
         # Stale invalid recipe metadata must not affect the non-quantized path.
         with torch.no_grad():
