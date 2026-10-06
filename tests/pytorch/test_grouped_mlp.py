@@ -198,9 +198,17 @@ def traced_cudnn_grouped_glu_wrappers(monkeypatch):
     original_hadamard = getattr(cudnn, "grouped_gemm_glu_hadamard_wrapper_sm100", None)
     calls = []
 
+    def _operand_dtype(kwargs, name):
+        """Record the kernel dtype when the caller supplies a raw storage buffer."""
+        layout = (kwargs.get("tensor_layouts") or {}).get(name)
+        if layout is not None:
+            return layout[2]
+        tensor = kwargs.get(name)
+        return None if tensor is None else tensor.dtype
+
     def _weight_dtype(kwargs):
         b_tensor = kwargs.get("b_tensor")
-        return b_tensor.dtype if b_tensor is not None else kwargs.get("b_dtype")
+        return _operand_dtype(kwargs, "b_tensor") if b_tensor is not None else kwargs.get("b_dtype")
 
     @functools.wraps(original_fwd)
     def traced_fwd(*args, **kwargs):
@@ -208,7 +216,7 @@ def traced_cudnn_grouped_glu_wrappers(monkeypatch):
             {
                 "kind": "fwd",
                 "weight_mode": "dense" if kwargs.get("b_tensor") is not None else "discrete",
-                "a_dtype": kwargs["a_tensor"].dtype,
+                "a_dtype": _operand_dtype(kwargs, "a_tensor"),
                 "b_dtype": _weight_dtype(kwargs),
                 "alpha_dtype": kwargs["alpha_tensor"].dtype,
                 "prob_dtype": (
@@ -229,7 +237,7 @@ def traced_cudnn_grouped_glu_wrappers(monkeypatch):
             {
                 "kind": "bwd",
                 "weight_mode": "dense" if kwargs.get("b_tensor") is not None else "discrete",
-                "a_dtype": kwargs["a_tensor"].dtype,
+                "a_dtype": _operand_dtype(kwargs, "a_tensor"),
                 "b_dtype": _weight_dtype(kwargs),
                 "c_dtype": kwargs["c_tensor"].dtype,
                 "alpha_dtype": kwargs["alpha_tensor"].dtype,
@@ -3421,3 +3429,227 @@ def test_grouped_gemm_quant_cute_matches_mxfp8_quantized() -> None:
         d_cute = d_cute.squeeze(-1)
     tols = dtype_tols(torch.bfloat16)
     assert_close(d_cute[:total_m].float(), ref, **tols)
+
+
+@pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+@pytest.mark.parametrize(
+    "num_groups,primary_weights,grad_mode,dtype",
+    [
+        pytest.param(
+            num_groups,
+            primary_weights,
+            grad_mode,
+            torch.bfloat16,
+            id=f"{grad_mode}-{'mxfp8' if primary_weights else 'bf16'}-primary-{num_groups}",
+        )
+        for grad_mode in ("autograd", "accumulate", "overwrite", "delayed")
+        for primary_weights in (False, True)
+        for num_groups in (1, 8, 32)
+    ]
+    + [
+        pytest.param(8, False, "autograd", torch.float16, id="autograd-fp16-primary-8"),
+        pytest.param(8, True, "autograd", torch.float16, id="autograd-mxfp8-primary-fp16-8"),
+    ],
+)
+def test_grouped_mlp_native_layout_bitwise(
+    monkeypatch, num_groups: int, primary_weights: bool, grad_mode: str, dtype: torch.dtype
+) -> None:
+    """Native and legacy adapters preserve a packed MXFP8 training step bit for bit.
+
+    Both routes invoke the same real cuDNN wrappers. Two microbatches change inputs
+    and device-side expert boundaries without rebuilding the fused operation, and
+    compare output, dgrad, probability gradient and both weight gradients after
+    each backward. The second microbatch includes an empty expert when E > 1.
+    Two E8 autograd cases also exercise FP16 activations and outputs.
+    """
+    import cudnn
+    from transformer_engine.pytorch.cpp_extensions import cudnn as cudnn_gemm
+
+    monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
+    monkeypatch.setenv("NVTE_CUTEDSL_FUSED_GROUPED_MLP", "1")
+    monkeypatch.setenv("CUDNN_FE_GROUPED_GEMM_DYNAMIC_MNKL", "1")
+    monkeypatch.setenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")
+    monkeypatch.setenv("NVTE_DISABLE_CUTEDSL_WGRAD_FUSED_GROUPED_MLP", "0")
+    fused_cls = grouped_mlp_module.GroupedMLP_CuTeGEMMGLU
+    if not fused_cls.is_supported():
+        pytest.skip("cuDNN fused MXFP8 grouped MLP is unavailable")
+
+    wrapper_names = (
+        "grouped_gemm_glu_wrapper_sm100",
+        "grouped_gemm_quant_wrapper_sm100",
+        "grouped_gemm_dglu_wrapper_sm100",
+        "grouped_gemm_wgrad_wrapper_sm100",
+    )
+    wrappers = {name: getattr(cudnn, name, None) for name in wrapper_names}
+    if not all(
+        wrapper is not None and cudnn_gemm._supports_tensor_layouts(wrapper)
+        for wrapper in wrappers.values()
+    ):
+        pytest.skip("cuDNN grouped GEMM tensor_layouts support is unavailable")
+
+    calls = []
+
+    def trace(name, wrapper):
+        @functools.wraps(wrapper)
+        def traced(*args, **kwargs):
+            calls.append((name, wrapper, kwargs.get("tensor_layouts")))
+            return wrapper(*args, **kwargs)
+
+        return traced
+
+    def clear_caches():
+        _clear_grouped_glu_kernel_caches()
+        fused_cls.grouped_gemm_quant_kernel.cache_clear()
+        fused_cls.grouped_gemm_wgrad_kernel.cache_clear()
+
+    clear_caches()
+    for name, wrapper in wrappers.items():
+        monkeypatch.setattr(cudnn, name, trace(name, wrapper))
+
+    recipe = make_recipe("mxfp8")
+    hidden_size = 256
+    ffn_size = 512  # Non-square B exposes an accidental N/K swap in dgrad.
+    weights = (
+        torch.empty(num_groups, 2 * ffn_size, hidden_size, device="cuda", dtype=dtype).uniform_(
+            -0.125, 0.125
+        ),
+        torch.empty(num_groups, hidden_size, ffn_size, device="cuda", dtype=dtype).uniform_(
+            -0.125, 0.125
+        ),
+    )
+    split_lists = [[256 * (1 + index % 3) for index in range(num_groups)]]
+    next_splits = list(reversed(split_lists[0]))
+    if num_groups > 1:
+        next_splits[-1] += next_splits[0]
+        next_splits[0] = 0
+    split_lists.append(next_splits)
+    total_tokens = sum(split_lists[0])
+    batches = []
+    for splits in split_lists:
+        batches.append(
+            (
+                torch.empty(total_tokens, hidden_size, device="cuda", dtype=dtype).uniform_(
+                    -0.25, 0.25
+                ),
+                torch.empty(total_tokens, device="cuda", dtype=dtype).uniform_(0.125, 0.5),
+                torch.empty(total_tokens, hidden_size, device="cuda", dtype=dtype).uniform_(
+                    -0.25, 0.25
+                ),
+                torch.tensor(splits, device="cuda", dtype=torch.int64),
+            )
+        )
+
+    def run(native):
+        probe_calls = []
+
+        def supports(wrapper):
+            probe_calls.append(wrapper)
+            return native
+
+        monkeypatch.setattr(cudnn_gemm, "_supports_tensor_layouts", supports)
+        accumulate = grad_mode != "autograd"
+        with te.quantized_model_init(enabled=primary_weights, recipe=recipe):
+            fc1 = te.ops.GroupedLinear(
+                num_groups,
+                hidden_size,
+                2 * ffn_size,
+                bias=False,
+                device="cuda",
+                dtype=dtype,
+                single_grouped_weight=True,
+                accumulate_into_main_grad=accumulate,
+                delay_wgrad_compute=grad_mode == "delayed",
+            )
+            fc2 = te.ops.GroupedLinear(
+                num_groups,
+                ffn_size,
+                hidden_size,
+                bias=False,
+                device="cuda",
+                dtype=dtype,
+                single_grouped_weight=True,
+                accumulate_into_main_grad=accumulate,
+                delay_wgrad_compute=grad_mode == "delayed",
+            )
+            model = te.ops.Sequential(fc1, te.ops.ScaledSwiGLU(glu_interleave_size=32), fc2)
+        with torch.no_grad():
+            for op, source in zip((fc1, fc2), weights):
+                parts = op.weight.quantized_tensors or op.weight.split_into_quantized_tensors()
+                for part, value in zip(parts, source):
+                    part.copy_(value)
+        if accumulate:
+            MegatronTrainingHelper.init_main_grad_buffers(
+                (fc1.weight, fc2.weight),
+                fill_value=0.5,
+                overwrite_main_grad=grad_mode == "overwrite",
+                zero_out_wgrad=True,
+            )
+
+        results = []
+        first_adapter = None
+        probe_count = None
+        for x_base, probs_base, dy, splits in batches:
+            x = x_base.detach().clone().requires_grad_(True)
+            probs = probs_base.detach().clone().requires_grad_(True)
+            with te.autocast(enabled=True, recipe=recipe):
+                output = model(x, splits, probs, splits)
+            assert output.dtype == dtype
+            output.backward(dy)
+            if grad_mode == "delayed":
+                fc1.backward_dw()
+                fc2.backward_dw()
+            fused = model._module_groups[0]._forward_ops[0][0]
+            assert isinstance(fused, fused_cls)
+            assert len(model._module_groups[0]._forward_ops) == 1
+            adapter = fused._cudnn_gemm
+            assert adapter.use_native_layouts is native
+            assert adapter.use_native_wgrad_layouts is native
+            if first_adapter is None:
+                first_adapter = adapter
+                probe_count = len(probe_calls)
+                assert probe_count > 0
+            else:
+                assert adapter is first_adapter
+                assert (
+                    len(probe_calls) == probe_count
+                ), "Capabilities were re-probed in the hot path"
+            gradients = [
+                (op.weight.main_grad if accumulate else op.weight.grad).detach().clone()
+                for op in (fc1, fc2)
+            ]
+            results.append(
+                (
+                    output.detach().clone(),
+                    x.grad.detach().clone(),
+                    probs.grad.detach().clone(),
+                    *gradients,
+                )
+            )
+        return results
+
+    try:
+        legacy_results = run(False)
+        legacy_calls = tuple(calls)
+        calls.clear()
+        native_results = run(True)
+        assert legacy_calls and calls
+        assert {entry[:2] for entry in legacy_calls} == {entry[:2] for entry in calls}
+        if num_groups > 1:
+            assert {entry[0] for entry in calls} == set(wrapper_names)
+        assert all(layouts is None for _, _, layouts in legacy_calls)
+        assert all(layouts is not None for _, _, layouts in calls)
+        for old_batch, new_batch in zip(legacy_results, native_results):
+            for name, old, new in zip(
+                ("output", "dgrad", "dprob", "fc1_wgrad", "fc2_wgrad"), old_batch, new_batch
+            ):
+                assert old.shape == new.shape, name
+                assert old.dtype == new.dtype, name
+                torch.testing.assert_close(
+                    old.contiguous().view(torch.uint8),
+                    new.contiguous().view(torch.uint8),
+                    rtol=0,
+                    atol=0,
+                    msg=name,
+                )
+    finally:
+        clear_caches()
