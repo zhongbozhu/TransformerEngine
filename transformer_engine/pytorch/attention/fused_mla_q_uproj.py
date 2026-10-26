@@ -15,9 +15,8 @@ import weakref
 from importlib.metadata import PackageNotFoundError, version as get_pkg_version
 
 import torch
-from packaging.version import Version as PkgVersion
-
 import transformer_engine_torch as tex
+from packaging.version import Version as PkgVersion
 
 try:
     import triton
